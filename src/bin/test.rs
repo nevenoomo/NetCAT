@@ -1,6 +1,6 @@
-use ibverbs;
-use crate::connection::rdma::RdmaServerConnector;
+use netcat::connection::rdma::RdmaServerConnector;
 
 fn main() {
-    let mut client = RdmaServerConnector::new("127.0.0.1:9003");
+    let client = RdmaServerConnector::new("127.0.0.1:9003");
+    println!("RDMA handshake successful!");
 }
