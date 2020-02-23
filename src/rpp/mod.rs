@@ -3,17 +3,18 @@
 //! The method is described in _NetCAT: Practical Cache Attacks from the Network_.
 
 #![allow(dead_code)]
-#![allow(dead_code)]
 use crate::connection::{MemoryConnector, Time};
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
+use std::io::{Error, ErrorKind, Result};
 
 pub static NUM_OF_SETS: usize = 64;
 pub static BUFF_LEN: usize = 8388608; // 8 MiB
 pub static BYTES_PER_LINE: usize = 64;
 pub static LINES_PER_SET: usize = 12;
-pub static THRESHOLD: Time = 5000;
+pub static THRESHOLD: Time = 500;
 pub static DELTA: usize = 30;
+pub static MAX_RETRY: usize = 100;
 
 type Address = usize;
 type Contents = u64;
@@ -50,6 +51,8 @@ impl Params {
         }
     }
 }
+
+// TODO: writes and reads should not fail on the first try. Implement repeating writes.
 
 /// # RPP
 /// Contains the context of the RPP for a given connection.
@@ -103,25 +106,19 @@ impl RPP {
         self.conn.allocate(self.params.buff_len);
     }
 
-    pub fn build_set(&mut self) -> Result<Box<EvictionSet>, String> {
+    pub fn build_set(&mut self) -> Result<Box<EvictionSet>> {
         let mut x = 0;
-        let mut s = match self.forward_selection(&mut x) {
-            Ok(s) => s,
-            Err(m) => return Err(m), // Pass the error further
-        };
+        let mut s = self.forward_selection(&mut x)?;
 
-        if let Err(m) = self.backward_selection(&mut s, &x) {
-            return Err(m);
-        }
+        self.backward_selection(&mut s, &x)?;
 
         // repeat cleanup for unless we finish it
-        // IDEA: is it ok? We may lose a lot of time here
-        while let Err(_) = self.cleanup(&s) {}
+        while self.cleanup(&s).is_err() {}
 
         Ok(s)
     }
 
-    fn forward_selection(&mut self, x: &mut Address) -> Result<Box<EvictionSet>, String> {
+    fn forward_selection(&mut self, x: &mut Address) -> Result<Box<EvictionSet>> {
         let mut n = 1;
         // We expect to have this much elems in the resulting set
         let mut latencies = HashMap::with_capacity(self.params.buff_len / 4);
@@ -130,10 +127,27 @@ impl RPP {
             let mut sub_set = self.addrs.iter().take(n).map(|&x| x).collect();
             // First, we write the whole buffer. Some addrs might get evicted by the consequent writes.
             // Repeat until we do not return errors
-            while let Err(_) = self.write_set(&sub_set) {}
+            while self.write_set(&sub_set).is_err() {}
 
             for addr in sub_set.iter() {
-                latencies.insert(*addr, self.conn.read_timed(*addr));
+                let mut cnt = 0;
+                let mut lat = 0;
+                let mut err = Error::new(ErrorKind::Other, "");
+
+                while cnt < MAX_RETRY {
+                    match self.conn.read_timed(*addr) {
+                        Ok(l) => {
+                            lat = l;
+                            break;
+                        }
+                        Err(e) => err = e,
+                    }
+                }
+
+                if cnt == MAX_RETRY {
+                    return Err(err);
+                }
+                let lat = latencies.insert(*addr, lat);
             }
 
             let mut lats = latencies.iter();
@@ -149,22 +163,15 @@ impl RPP {
                 })
                 .0; // Take the key from the pair (which is an address with the biggest latency)
                     // Measure hit time for x
-            if let Err(s) = self.conn.write(*x) {
-                return Err(s);
-            }
-            let t1 = match self.conn.read_timed(*x) {
-                Ok(t) => t,
-                Err(s) => return Err(s),
-            };
+            self.conn.write(*x)?;
+
+            let t1 = self.conn.read_timed(*x)?;
 
             // Potentially take x from the main memory
             sub_set.remove(&x);
-            while let Err(_) = self.write_set(&sub_set) {}
+            while self.write_set(&sub_set).is_err() {}
 
-            let t2 = match self.conn.read_timed(*x) {
-                Ok(t) => t,
-                Err(s) => return Err(s),
-            };
+            let t2 = self.conn.read_timed(*x)?;
 
             // TODO: dynamic thresh hold
             if t2 - t1 > self.params.threshold && sub_set.len() >= self.params.lines_per_set {
@@ -175,10 +182,13 @@ impl RPP {
         }
     }
 
-    fn backward_selection(&mut self, s: &mut EvictionSet, x: &Address) -> Result<(), String> {
+    fn backward_selection(&mut self, s: &mut EvictionSet, x: &Address) -> Result<()> {
         let mut n = 1;
         loop {
-            assert!(s.len() > self.params.lines_per_set, "Eviction set shrunk down too much");
+            assert!(
+                s.len() >= self.params.lines_per_set,
+                "Eviction set shrunk down too much"
+            );
             // if S is relatively small, then we do not use step adjusting
             n = if s.len() < self.params.lines_per_set + DELTA {
                 1
@@ -188,24 +198,14 @@ impl RPP {
             let s_rm: HashSet<Address> = s.iter().take(n).map(|&x| x).collect();
 
             // Measure cache hit time for x
-            if let Err(m) = self.conn.write(*x) {
-                return Err(m);
-            }
-            let t1 = match self.conn.read_timed(*x) {
-                Ok(t) => t,
-                // pass the error up
-                Err(s) => return Err(s),
-            };
+            self.conn.write(*x)?;
+
+            let t1 = self.conn.read_timed(*x)?;
 
             // potentially read x from the main memory
-            if let Err(m) = self.write_set_except(s, &s_rm) {
-                return Err(m);
-            }
-            let t2 = match self.conn.read_timed(*x) {
-                Ok(t) => t,
-                // pass the error up
-                Err(s) => return Err(s),
-            };
+            self.write_set_except(s, &s_rm)?;
+
+            let t2 = self.conn.read_timed(*x)?;
 
             // is x still evicted?
             if t2 - t1 > self.params.threshold {
@@ -218,14 +218,12 @@ impl RPP {
             }
 
             if s.len() == self.params.lines_per_set {
-                break;
+                return Ok(());
             }
         }
-
-        Ok(())
     }
 
-    fn cleanup(&mut self, s: &EvictionSet) -> Result<(), ()> {
+    fn cleanup(&mut self, s: &EvictionSet) -> Result<()> {
         // remove addrs, which we used for eviction set
         self.addrs.difference(s);
         let mut error = false;
@@ -235,10 +233,11 @@ impl RPP {
 
         for &x in addrs.iter() {
             // measure x hit time
-            if let Err(_) = self.conn.write(x) {
+            if self.conn.write(x).is_err() {
                 error = true;
                 break;
             }
+
             let t1 = match self.conn.read_timed(x) {
                 Ok(t) => t,
                 // pass the error up
@@ -271,15 +270,14 @@ impl RPP {
         // remove all unused addrs
         s.difference(&to_be_removed);
 
-        // this is not informative, but this step is not critical
         if error {
-            return Err(());
+            return Err(Error::new(ErrorKind::Other, "Error during cleanup"));
         }
 
         Ok(())
     }
 
-    fn write_set(&mut self, s: &EvictionSet) -> Result<(), String> {
+    fn write_set(&mut self, s: &EvictionSet) -> Result<()> {
         for addr in s.iter() {
             if let Err(m) = self.conn.write(*addr) {
                 return Err(m);
@@ -289,7 +287,7 @@ impl RPP {
         Ok(())
     }
 
-    fn write_set_except(&mut self, s: &EvictionSet, s_rm: &EvictionSet) -> Result<(), String> {
+    fn write_set_except(&mut self, s: &EvictionSet, s_rm: &EvictionSet) -> Result<()> {
         // UGLY: can make it with Iterators?
         for &x in s.iter().filter(|x| !s_rm.contains(x)) {
             if let Err(s) = self.conn.write(x) {
@@ -302,7 +300,8 @@ impl RPP {
 
 pub mod test {
     use super::*;
-    use crate::connection::{LocalMemoryConnector, MemoryConnector};
+    use crate::connection::local::LocalMemoryConnector;
+    use crate::connection::MemoryConnector;
     use rand;
     use rand::Rng;
     use std::collections::HashSet;
@@ -334,7 +333,7 @@ pub mod test {
             rpp
         }
 
-        pub fn naive_build_set(&mut self) -> Result<Box<EvictionSet>, String> {
+        pub fn naive_build_set(&mut self) -> Result<Box<EvictionSet>> {
             self.conn.allocate(self.params.buff_len);
             let mut rnd = rand::thread_rng();
             let &x = self
@@ -375,7 +374,7 @@ pub mod test {
             }
         }
 
-        fn write_set(&mut self, s: &EvictionSet) -> Result<(), String> {
+        fn write_set(&mut self, s: &EvictionSet) -> Result<()> {
             for addr in s.iter() {
                 if let Err(m) = self.conn.write(*addr) {
                     return Err(m);
@@ -384,7 +383,7 @@ pub mod test {
             Ok(())
         }
 
-        fn write_set_except(&mut self, s: &EvictionSet, s_rm: &EvictionSet) -> Result<(), String> {
+        fn write_set_except(&mut self, s: &EvictionSet, s_rm: &EvictionSet) -> Result<()> {
             // UGLY: can make it with Iterators?
             for &x in s.iter().filter(|x| !s_rm.contains(x)) {
                 if let Err(s) = self.conn.write(x) {

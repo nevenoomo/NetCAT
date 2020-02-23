@@ -1,12 +1,11 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use NetCAT::connection::*;
-use NetCAT::rpp::test::NaiveRpp;
-use NetCAT::rpp::RPP;
+use netcat::rpp::RPP;
+use netcat::connection::local::*;
 
 pub fn rpp_bench(c: &mut Criterion) {
     let mut group = c.benchmark_group("RPP benchmark");
 
-    group.sample_size(25);
+    group.sample_size(20);
 
     group.bench_function("RPP bench", |b| {
         b.iter(|| {
