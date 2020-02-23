@@ -1,6 +1,9 @@
 use ibverbs;
 use std::net;
 use std::env;
+use netcat::connection::rdma::RdmaPrimitive;
+use std::io::Write;
+use std::io::Error;
 
 const BUF_SIZE: usize = 8388608; // 8 MB
 const ADDR_KEY: &str = "RDMA_ADDR";
@@ -73,41 +76,24 @@ fn main() {
     msg.rkey = mr.rkey();
     msg.raddr = ibverbs::RemoteAddr(laddr);
 
-    let addr = env::var(ADDR_KEY).unwrap_or("127.0.0.1:9003");
+    let addr = env::var(ADDR_KEY.to_string()).unwrap_or("127.0.0.1:9003".to_string());
 
     let listner = net::TcpListener::bind(addr).expect("Listener failed");
     let (mut stream, addr) = listner.accept().expect("Accepting failed");
     
     println!("Client connected!"); 
+    
+    let read_stream = stream.try_clone().expect("could not clone stream");
 
-    let ser_msg = match bincode::serialize(&msg) {
-        Ok(data) => data,
-        Err(e) => panic!("ERROR: failed to serialize message: {}", e),
-    };
     // This looks so much better.
-    let mut rmsg: ibverbs::EndpointMsg = bincode::deserialize_from(stream)
+    let mut rmsg: ibverbs::EndpointMsg = bincode::deserialize_from(read_stream)
         .unwrap_or_else(|e| panic!("ERROR: failed to recieve data: {}", e));
     
     let rkey = rmsg.rkey;
     let raddr = rmsg.raddr;
     let rendpoint = rmsg.into();
 
-    // Sending info for RDMA handshake over TcpStream;
-    // UGLY: This could be done with one line as
-    // bincode can serialize into a writer (which a stream is), but it would take ownership
-    // of stream. `try_clone()` may be used.
-    let mut sent = 0;
-    loop {
-        match stream.write(&ser_msg[sent..]) {
-            Ok(n) => {
-                sent += n;
-                if sent == ser_msg.len() {
-                    break;
-                }
-            }
-            Err(e) => panic!("ERROR: failed to transmit serealized message: {}", e),
-        }
-    }
+    bincode::serialize_into(stream, &msg);
 
     let qp = qp_init
         .handshake(rendpoint)
