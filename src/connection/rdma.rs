@@ -13,7 +13,7 @@ const LOCAL_BUF_SIZE: usize = 4096;
 pub type RdmaPrimitive = u8;
 
 struct InitializedQp {
-    qp: ibverbs::QueuePair,
+    qp: Arc<ibverbs::QueuePair>,
     rkey: ibverbs::RemoteKey,
     raddr: ibverbs::RemoteAddr,
 }
@@ -31,9 +31,9 @@ impl InitializedQp {
 /// Holds all of the context for a single connection
 pub struct RdmaServerConnector {
     ctx: Arc<ibverbs::Context>,
-    cq: ibverbs::CompletionQueue,
-    pd: ibverbs::ProtectionDomain,
-    mr: ibverbs::MemoryRegion<RdmaPrimitive>,
+    cq: Arc<ibverbs::CompletionQueue>,
+    pd: Arc<ibverbs::ProtectionDomain>,
+    mr: Arc<ibverbs::MemoryRegion<RdmaPrimitive>>,
     iqp: InitializedQp,
 }
 
@@ -64,10 +64,10 @@ impl RdmaServerConnector {
         }
     }
 
-    fn aquire_pd(ctx: Arc<ibverbs::Context>) -> Result<ibverbs::ProtectionDomain> {
+    fn aquire_pd(ctx: Arc<ibverbs::Context>) -> Result<Arc<ibverbs::ProtectionDomain>> {
         // Create a protection domain
         match ctx.alloc_pd() {
-            Ok(pd) => Ok(pd),
+            Ok(pd) => Ok(Arc::new(pd)),
             Err(_) => {
                 return Err(Error::new(
                     ErrorKind::Other,
@@ -77,7 +77,7 @@ impl RdmaServerConnector {
         }
     }
 
-    fn aquire_cq(ctx: Arc<ibverbs::Context>) -> Result<ibverbs::CompletionQueue> {
+    fn aquire_cq(ctx: Arc<ibverbs::Context>) -> Result<Arc<ibverbs::CompletionQueue>> {
         let dev_attr = match ctx.query_device() {
             Ok(da) => da,
             Err(e) => {
@@ -90,7 +90,7 @@ impl RdmaServerConnector {
 
         // Create Complition Queue
         match ctx.create_cq(dev_attr.max_cqe, 0) {
-            Ok(cq) => Ok(cq),
+            Ok(cq) => Ok(Arc::new(cq)),
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Other,
@@ -100,10 +100,10 @@ impl RdmaServerConnector {
         }
     }
 
-    fn register_mr(pd: &ibverbs::ProtectionDomain) -> Result<ibverbs::MemoryRegion<RdmaPrimitive>> {
+    fn register_mr(pd: &ibverbs::ProtectionDomain) -> Result<Arc<ibverbs::MemoryRegion<RdmaPrimitive>>> {
         // here we need to allocate memory and register a memory region just for RDMA porposes
         match pd.allocate::<RdmaPrimitive>(LOCAL_BUF_SIZE) {
-            Ok(mr) => Ok(mr),
+            Ok(mr) => Ok(Arc::new(mr)),
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Other,
@@ -141,7 +141,7 @@ impl RdmaServerConnector {
         let rendpoint = rmsg.into();
 
         match qp_init.handshake(rendpoint) {
-            Ok(qp) => Ok(InitializedQp { qp, rkey, raddr }),
+            Ok(qp) => Ok(InitializedQp { qp : Arc::new(qp), rkey, raddr }),
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Other,
@@ -212,17 +212,23 @@ impl RdmaServerConnector {
         Ok(rmsg)
     }
 
-    fn setup_ib<A: net::ToSocketAddrs>(&mut self, addr: A) -> Result<()> {
+    fn setup_ib<A: net::ToSocketAddrs>(addr: A) -> Result<RdmaServerConnector> {
         Self::fork_init()?;
-        self.ctx = Self::aquire_ctx()?;
-        self.pd = Self::aquire_pd(self.ctx.clone())?;
-        self.cq = Self::aquire_cq(self.ctx.clone())?;
-        self.mr = Self::register_mr(&self.pd)?;
-        let lkey = self.mr.rkey();
-        let laddr = ibverbs::RemoteAddr((&self.mr[0] as *const RdmaPrimitive) as u64);
-        self.iqp = Self::setup_qp(addr, &self.pd, &self.cq, lkey, laddr)?;
+        let ctx = Self::aquire_ctx()?;
+        let pd = Self::aquire_pd(ctx.clone())?;
+        let cq = Self::aquire_cq(ctx.clone())?;
+        let mr = Self::register_mr(&pd)?;
+        let lkey = mr.rkey();
+        let laddr = ibverbs::RemoteAddr((&mr[0] as *const RdmaPrimitive) as u64);
+        let iqp = Self::setup_qp(addr, &pd, &cq, lkey, laddr)?; //DEBUG: panics here
 
-        Ok(())
+        Ok(RdmaServerConnector{
+            ctx,
+            pd,
+            cq,
+            mr,
+            iqp,
+        })
     }
 
     /// Creates a new `RdmaConnector` to interact with a RDMA peer. The first available
@@ -231,12 +237,7 @@ impl RdmaServerConnector {
     /// Panics if there is no support for RDMA in the kernel, no RDMA devices where found,
     /// or if a device cannot be opened
     pub fn new<A: net::ToSocketAddrs>(addr: A) -> RdmaServerConnector {
-        #[allow(invalid_value)]
-        let mut rdma_con: RdmaServerConnector = unsafe { mem::MaybeUninit::uninit().assume_init() };
-
-        rdma_con.setup_ib(addr).unwrap_or_else(|e| panic!("{}", e));
-
-        rdma_con
+        Self::setup_ib(addr).unwrap_or_else(|e| panic!("{}", e))
     }
 
     fn get_devs() -> Result<ibverbs::DeviceList> {

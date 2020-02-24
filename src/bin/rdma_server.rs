@@ -2,7 +2,6 @@ use ibverbs;
 use std::net;
 use std::env;
 use netcat::connection::rdma::RdmaPrimitive;
-use std::io::Write;
 use std::io::Error;
 
 const BUF_SIZE: usize = 8388608; // 8 MB
