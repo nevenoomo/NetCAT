@@ -5,7 +5,6 @@ use crate::connection::{MemoryConnector, Time};
 use bincode;
 use ibverbs;
 use std::io::{Error, ErrorKind, Result, Write};
-use std::mem;
 use std::net;
 use std::sync::Arc;
 
@@ -29,12 +28,12 @@ impl InitializedQp {
 }
 
 /// Holds all of the context for a single connection
-pub struct RdmaServerConnector {
-    ctx: Arc<ibverbs::Context>,
-    cq: Arc<ibverbs::CompletionQueue>,
-    pd: Arc<ibverbs::ProtectionDomain>,
-    mr: Arc<ibverbs::MemoryRegion<RdmaPrimitive>>,
+pub struct RdmaServerConnector { // field order matters!!! Otherwise will panic on drop.
     iqp: InitializedQp,
+    cq: Arc<ibverbs::CompletionQueue>,
+    mr: Arc<ibverbs::MemoryRegion<RdmaPrimitive>>,
+    pd: Arc<ibverbs::ProtectionDomain>,
+    ctx: Arc<ibverbs::Context>,
 }
 
 impl RdmaServerConnector {
