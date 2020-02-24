@@ -99,4 +99,5 @@ fn main() {
         .unwrap_or_else(|e| panic!("ERROR: failed to handshake: {}", e));
 
     println!("RDMA handshake successfull");
+    loop{}
 }
