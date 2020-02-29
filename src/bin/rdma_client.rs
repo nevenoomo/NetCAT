@@ -16,7 +16,7 @@ fn main() {
     println!("Read successful. Got: {}", ret);
 
     println!("Trying to read from the remote server and measure latency");
-    let lat = client.read(0).unwrap();
+    let lat = client.read_timed(0).unwrap();
     println!("Read successful. Latency: {}", lat);
 
     println!("Routrine successful!");

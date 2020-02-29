@@ -11,7 +11,6 @@ use std::time::Instant;
 
 const LOCAL_BUF_SIZE: usize = 4096;
 const WR_ID: u64 = 12949723411804112106;
-const POLL_RETRY_TIMES: u64 = 120000;
 pub type RdmaPrimitive = u8;
 
 struct InitializedQp {
@@ -283,7 +282,7 @@ impl RdmaServerConnector {
         unsafe {
             self.iqp
                 .qp
-                .post_read_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, false)
+                .post_read_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, true)
         }
     }
 
@@ -291,12 +290,12 @@ impl RdmaServerConnector {
         unsafe {
             self.iqp
                 .qp
-                .post_write_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, false)
+                .post_write_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, true)
         }
     }
 
     fn poll_cq_is_done(&self, compl: &mut [ibverbs::ffi::ibv_wc]) -> Result<()> {
-        for i in 0..POLL_RETRY_TIMES {
+        loop {
             let completed = match self.cq.poll(compl) {
                 Ok(o) => o,
                 Err(_) => {
@@ -314,7 +313,6 @@ impl RdmaServerConnector {
                 None => continue //TODO: maybe pass error here
             }
         }
-        Err(Error::new(ErrorKind::Other, "ERROR: polling CQ time exceeded"))
     }
 }
 
