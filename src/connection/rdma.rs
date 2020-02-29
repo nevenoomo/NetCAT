@@ -303,7 +303,7 @@ impl RdmaServerConnector {
         }
     }
 
-    fn post_read_buf(&self, addr: u64, n: usize) -> Result<()>{
+    fn post_read_buf(&self, addr: u64, n: usize) -> Result<()> {
         unsafe {
             self.iqp.qp.post_read_buf(
                 &self.mr.read().unwrap(),
@@ -316,7 +316,7 @@ impl RdmaServerConnector {
         }
     }
 
-    fn post_write_buf(&self, addr: u64, n: usize) -> Result<()>{
+    fn post_write_buf(&self, addr: u64, n: usize) -> Result<()> {
         unsafe {
             self.iqp.qp.post_write_buf(
                 &self.mr.read().unwrap(),
@@ -374,16 +374,18 @@ impl MemoryConnector for RdmaServerConnector {
 
     fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()> {
         let mut completions = [ibverbs::ibv_wc::default(); 16];
-        let mut buf = match self.mr.write() {
-            Ok(b) => b,
-            Err(_) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "ERROR: could not aquire write lock",
-                ))
-            }
-        };
-        buf[0] = *what;
+        {
+            let mut buf = match self.mr.write() {
+                Ok(b) => b,
+                Err(_) => {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        "ERROR: could not aquire write lock",
+                    ))
+                }
+            };
+            buf[0] = *what;
+        }
 
         self.post_write(self.iqp.raddr.0 + (ofs as u64))?;
         self.poll_cq_is_done(&mut completions)?;
@@ -399,7 +401,7 @@ impl MemoryConnector for RdmaServerConnector {
         Ok(elapsed)
     }
 
-    fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize>{
+    fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize> {
         let mut completions = [ibverbs::ibv_wc::default(); 16];
 
         self.post_read_buf(self.iqp.raddr.0 + (ofs as u64), buf.len())?;
@@ -411,7 +413,7 @@ impl MemoryConnector for RdmaServerConnector {
         Ok(buf.len())
     }
 
-    fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize,Time)>{
+    fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize, Time)> {
         let now = Instant::now();
         let n = self.read_buf(ofs, buf)?; // allocation time is nearly constant, thus it won't affect measurements
         let elapsed = now.elapsed().as_nanos();
@@ -419,18 +421,20 @@ impl MemoryConnector for RdmaServerConnector {
         Ok((n, elapsed))
     }
 
-    fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize>{
+    fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize> {
         let mut completions = [ibverbs::ibv_wc::default(); 16];
-        let mut dst = match self.mr.write() {
-            Ok(b) => b,
-            Err(_) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "ERROR: could not aquire write lock",
-                ))
-            }
-        };
-        (&mut dst[..buf.len()]).copy_from_slice(buf);
+        {
+            let mut dst = match self.mr.write() {
+                Ok(b) => b,
+                Err(_) => {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        "ERROR: could not aquire write lock",
+                    ))
+                }
+            };
+            (&mut dst[..buf.len()]).copy_from_slice(buf);
+        }
 
         self.post_write_buf(self.iqp.raddr.0 + (ofs as u64), buf.len())?;
         self.poll_cq_is_done(&mut completions)?;
@@ -438,11 +442,7 @@ impl MemoryConnector for RdmaServerConnector {
         Ok(buf.len())
     }
 
-    fn write_buf_timed(
-        &mut self,
-        ofs: usize,
-        buf: &[Self::Item],
-    ) -> Result<(usize, Time)>{
+    fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)> {
         let now = Instant::now();
         let n = self.write_buf(ofs, buf)?;
         let elapsed = now.elapsed().as_nanos();

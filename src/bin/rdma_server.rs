@@ -106,13 +106,13 @@ fn test<T>(mr: &mut ibverbs::MemoryRegion<T>)
 where
     T: Default + PartialEq + Copy + std::fmt::Display,
 {
-    let initial = Default::default();
-    mr[0] = initial;
+    let mut last_val = Default::default();
+    mr[0] = last_val;
 
     loop {
-        if mr[0] != initial {
+        if mr[0] != last_val {
             println!("Someone has written to the memory region, got: {}", mr[0]);
-            mr[0] = initial;
+            last_val = mr[0];
         }
     }
 }
