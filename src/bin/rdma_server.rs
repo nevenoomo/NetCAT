@@ -65,6 +65,7 @@ fn main() {
 
     let qp_init = pd
         .create_qp(&cq, &cq, ibverbs::ibv_qp_type::IBV_QPT_RC)
+        .allow_remote_rw() // Allow RDMA reads and writes
         .build()
         .unwrap_or_else(|e| panic!("ERROR: failed to initialize Queue Pair: {}", e));
 

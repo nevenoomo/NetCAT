@@ -125,8 +125,7 @@ impl RdmaServerConnector {
         laddr: ibverbs::RemoteAddr,
     ) -> Result<InitializedQp> {
         let qp_init = {
-            let mut qp_builder = pd.create_qp(cq, cq, ibverbs::ibv_qp_type::IBV_QPT_RC);
-            qp_builder.allow_remote_rw(); // Allow RDMA reads and writes
+            let qp_builder = pd.create_qp(cq, cq, ibverbs::ibv_qp_type::IBV_QPT_RC); // client access flags default to ALLOW_LOCAL_WRITES which is ok 
             match qp_builder.build() {
                 Ok(qp) => qp,
                 Err(e) => {
