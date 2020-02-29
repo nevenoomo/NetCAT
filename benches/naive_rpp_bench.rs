@@ -3,11 +3,11 @@ use netcat::connection::local::*;
 use netcat::rpp::test::NaiveRpp;
 
 pub fn rpp_bench(c: &mut Criterion) {
-    let mut group = c.benchmark_group("RPP benchmark");
+    let mut group = c.benchmark_group("RRIME+PROBE benchmark");
 
-    group.sample_size(10);
+    group.sample_size(100);
 
-    group.bench_function("Naive RPP", |b| {
+    group.bench_function("Naive RRIME+PROBE", |b| {
         b.iter(|| {
             let conn = Box::new(LocalMemoryConnector::new());
 

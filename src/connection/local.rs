@@ -47,7 +47,7 @@ impl MemoryConnector for LocalMemoryConnector {
     }
 
     fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize>{
-        buf.copy_from_slice(&self.buf[..buf.len()]);
+        buf.copy_from_slice(&self.buf[ofs..ofs+buf.len()]);
 
         Ok(buf.len())
     }
@@ -61,7 +61,7 @@ impl MemoryConnector for LocalMemoryConnector {
     }
 
     fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize>{
-        (&mut self.buf[..buf.len()]).copy_from_slice(buf);
+        (&mut self.buf[ofs..ofs+buf.len()]).copy_from_slice(buf);
 
         Ok(buf.len())
     }

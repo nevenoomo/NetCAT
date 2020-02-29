@@ -4,15 +4,16 @@
 
 #![allow(dead_code)]
 use crate::connection::{MemoryConnector, Time};
+use rand;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
-use std::io::{Error, ErrorKind, Result};
+use std::io::Result;
 
 pub static NUM_OF_SETS: usize = 64;
 pub static BUFF_LEN: usize = 8388608; // 8 MiB
 pub static BYTES_PER_LINE: usize = 64;
 pub static LINES_PER_SET: usize = 12;
-pub static THRESHOLD: Time = 500;
+pub static THRESHOLD: Time = 260;
 pub static DELTA: usize = 30;
 pub static MAX_RETRY: usize = 100;
 
@@ -52,8 +53,6 @@ impl Params {
     }
 }
 
-// TODO: writes and reads should not fail on the first try. Implement repeating writes.
-
 /// # RPP
 /// Contains the context of the RPP for a given connection.
 pub struct RPP {
@@ -75,10 +74,7 @@ impl RPP {
             ),
             conn: conn,
             sets: Vec::with_capacity(NUM_OF_SETS),
-            addrs: (0..BUFF_LEN)
-                .step_by(BYTES_PER_LINE)
-                .map(|x| x as Address)
-                .collect(),
+            addrs: (0usize..BUFF_LEN).step_by(BYTES_PER_LINE).collect(),
         };
 
         rpp.build_sets();
@@ -91,9 +87,8 @@ impl RPP {
             params: params,
             conn: conn,
             sets: Vec::with_capacity(params.num_of_sets),
-            addrs: (0..params.num_of_sets)
+            addrs: (0usize..params.num_of_sets)
                 .step_by(params.lines_per_set)
-                .map(|x| x as Address)
                 .collect(),
         };
 
@@ -106,117 +101,101 @@ impl RPP {
         self.conn.allocate(self.params.buff_len);
     }
 
+    // note that this step might fail only due to read & write fails. read and write fail only as the last resort
     pub fn build_set(&mut self) -> Result<Box<EvictionSet>> {
-        let mut x = 0;
-        let mut s = self.forward_selection(&mut x)?;
-
-        self.backward_selection(&mut s, &x)?;
-
-        // repeat cleanup for unless we finish it
-        while self.cleanup(&s).is_err() {}
+        let (mut s, x) = self.forward_selection()?;
+        self.backward_selection(&mut s, x)?;
+        self.cleanup(&s)?;
 
         Ok(s)
     }
 
-    fn forward_selection(&mut self, x: &mut Address) -> Result<Box<EvictionSet>> {
-        let mut n = 1;
+    fn forward_selection(&mut self) -> Result<(Box<EvictionSet>, Address)> {
+        let mut n = self.params.lines_per_set + 1;
         // We expect to have this much elems in the resulting set
         let mut latencies = HashMap::with_capacity(self.params.buff_len / 4);
 
         loop {
             let mut sub_set = self.addrs.iter().take(n).map(|&x| x).collect();
             // First, we write the whole buffer. Some addrs might get evicted by the consequent writes.
-            // Repeat until we do not return errors
-            while self.write_set(&sub_set).is_err() {}
+            // If this fails, then repeating won't help
+            self.write_set(&sub_set)?;
 
+            // Measure access time for all entries of a selected subset
             for addr in sub_set.iter() {
-                let mut cnt = 0;
-                let mut lat = 0;
-                let mut err = Error::new(ErrorKind::Other, "");
-
-                while cnt < MAX_RETRY {
-                    match self.conn.read_timed(*addr) {
-                        Ok(l) => {
-                            lat = l.1;
-                            break;
-                        }
-                        Err(e) => err = e,
-                    }
-                }
-
-                if cnt == MAX_RETRY {
-                    return Err(err);
-                }
-                let lat = latencies.insert(*addr, lat);
+                let (_, lat) = self.conn.read_timed(*addr)?;
+                latencies.insert(*addr, lat);
             }
 
-            let mut lats = latencies.iter();
-            let init = lats.next().expect("At least one item should be here");
-            *x = *lats
-                .fold(init, |acc, n| {
-                    // Compare values (which are latencies)
-                    if n.1 > acc.1 {
-                        n
-                    } else {
-                        acc
-                    }
-                })
+            // Now we find an address with the highest access time
+            let x = *latencies
+                .iter()
+                .max_by_key(|(_, &v)| v)
+                .expect("ERROR: Forward selection. Cannot deside on max addr lat.")
                 .0; // Take the key from the pair (which is an address with the biggest latency)
-                    // Measure hit time for x
-            self.conn.write(*x, &0)?;
 
-            let (_, t1) = self.conn.read_timed(*x)?;
+            // Measure cache hit time for x
+            self.conn.write(x, &rand::random())?;
+            let (_, t1) = self.conn.read_timed(x)?;
 
             // Potentially take x from the main memory
             sub_set.remove(&x);
-            while self.write_set(&sub_set).is_err() {}
+            self.write_set(&sub_set)?;
+            let (_, t2) = self.conn.read_timed(x)?;
 
-            let (_, t2) = self.conn.read_timed(*x)?;
-
-            // TODO: dynamic thresh hold
-            if t2 - t1 > self.params.threshold && sub_set.len() >= self.params.lines_per_set {
-                return Ok(Box::new(sub_set));
+            // TODO: dynamic threshhold
+            // Determine if x got evicted from the cache by this set
+            if t2 - t1 > self.params.threshold {
+                return Ok((Box::new(sub_set), x));
             }
 
             n += 1;
         }
     }
 
-    fn backward_selection(&mut self, s: &mut EvictionSet, x: &Address) -> Result<()> {
-        let mut n = 1;
+    // Here we assume that set `s` truly evicts address `x`
+    fn backward_selection(&mut self, s: &mut EvictionSet, x: Address) -> Result<()> {
+        assert!(
+            s.len() >= self.params.lines_per_set,
+            "ERROR: the initial set for backwards selection is too narrow."
+        );
+        // we may begin by trying to remove part of the overhead. If we fail, the trying less in ok
+        // TODO: Maybe use other method for finding initial point.
+        let mut n = (s.len() - self.params.lines_per_set) / 2;
         loop {
             assert!(
                 s.len() >= self.params.lines_per_set,
-                "Eviction set shrunk down too much"
+                "ERROR: Set shrunk too much during backwards selection"
             );
+
             // if S is relatively small, then we do not use step adjusting
             n = if s.len() < self.params.lines_per_set + DELTA {
                 1
             } else {
                 min(n, s.len() / 2)
             };
-            let s_rm: HashSet<Address> = s.iter().take(n).map(|&x| x).collect();
+            let s_rm: EvictionSet = s.iter().take(n).map(|&x| x).collect();
 
             // Measure cache hit time for x
-            self.conn.write(*x, &0)?;
+            self.conn.write(x, &rand::random())?;
+            let (_, t1) = self.conn.read_timed(x)?;
 
-            let (_, t1) = self.conn.read_timed(*x)?;
-
-            // potentially read x from the main memory
+            // Potentially read x from the main memory
             self.write_set_except(s, &s_rm)?;
+            let (_, t2) = self.conn.read_timed(x)?;
 
-            let (_, t2) = self.conn.read_timed(*x)?;
-
-            // is x still evicted?
+            // Determine if `x` got evicted by a reduced set S\S_rm
             if t2 - t1 > self.params.threshold {
+                // Truly remove S_rm from S
                 s.retain(|x| !s_rm.contains(x));
-                // during the next step we will try to remove 10 more addrs
+                // Suring the next step we will try to remove 10 more addrs
                 n += 10;
             } else {
-                // we removed too much
+                // We removed too much
                 n -= 1;
             }
 
+            // Stop when the size of the set equals the size of a cache set
             if s.len() == self.params.lines_per_set {
                 return Ok(());
             }
@@ -224,54 +203,24 @@ impl RPP {
     }
 
     fn cleanup(&mut self, s: &EvictionSet) -> Result<()> {
-        // remove addrs, which we used for eviction set
-        self.addrs.difference(s);
-        let mut error = false;
-        // we do not want to allocate memory on the fly
-        let mut to_be_removed = EvictionSet::with_capacity(s.len() / 4);
-        let addrs = self.addrs.clone();
+        // First we remove addr in set `S` from global addr pool
+        self.addrs.retain(|x| !s.contains(x));
+        // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
+        let addrs: HashSet<usize> = self.addrs.iter().cloned().collect();
 
-        for &x in addrs.iter() {
+        for x in addrs {
             // measure x hit time
-            if self.conn.write(x, &0).is_err() {
-                error = true;
-                break;
-            }
-
-            let (_, t1) = match self.conn.read_timed(x) {
-                Ok(t) => t,
-                // pass the error up
-                Err(_) => {
-                    error = true;
-                    break;
-                }
-            };
+            self.conn.write(x, &rand::random())?;
+            let (_, t1) = self.conn.read_timed(x)?;
 
             // potentially read x from the main memory
-            if let Err(_) = self.write_set(s) {
-                error = true;
-                break;
-            }
-            let (_, t2) = match self.conn.read_timed(x) {
-                Ok(t) => t,
-                // pass the error up
-                Err(_) => {
-                    error = true;
-                    break;
-                }
-            };
+            self.write_set(s)?;
+            let (_, t2) = self.conn.read_timed(x)?;
 
-            // We evicted x? then we do not need it anymore
+            // We evicted x? Then we do not need it anymore
             if t2 - t1 > self.params.threshold {
-                to_be_removed.insert(x);
+                self.addrs.remove(&x);
             }
-        }
-
-        // remove all unused addrs
-        s.difference(&to_be_removed);
-
-        if error {
-            return Err(Error::new(ErrorKind::Other, "Error during cleanup"));
         }
 
         Ok(())
@@ -279,21 +228,17 @@ impl RPP {
 
     fn write_set(&mut self, s: &EvictionSet) -> Result<()> {
         for addr in s.iter() {
-            if let Err(m) = self.conn.write(*addr, &0) {
-                return Err(m);
-            }
+            self.conn.write(*addr, &rand::random())?;
         }
 
         Ok(())
     }
 
     fn write_set_except(&mut self, s: &EvictionSet, s_rm: &EvictionSet) -> Result<()> {
-        // UGLY: can make it with Iterators?
         for &x in s.iter().filter(|x| !s_rm.contains(x)) {
-            if let Err(s) = self.conn.write(x, &0) {
-                return Err(s);
-            }
+            self.conn.write(x, &rand::random())?;
         }
+
         Ok(())
     }
 }
@@ -324,10 +269,7 @@ pub mod test {
                 ),
                 conn: conn,
                 sets: Vec::with_capacity(NUM_OF_SETS),
-                addrs: (0..BUFF_LEN)
-                    .step_by(BYTES_PER_LINE)
-                    .map(|x| x as Address)
-                    .collect(),
+                addrs: (0usize..BUFF_LEN).step_by(BYTES_PER_LINE).collect(),
             };
             rpp
         }
@@ -346,24 +288,23 @@ pub mod test {
             loop {
                 println!("Iteration: {}", i);
                 i += 1;
-                self.write_set(&ev_set);
-                let (_, t1) = self.conn.read_timed(x).unwrap();
-                let s;
-                {
-                    let s1 = ev_set
-                        .iter()
-                        .nth(rnd.gen_range(0, ev_set.len()))
-                        .unwrap()
-                        .clone();
 
-                    ev_set.remove(&s1);
-                    s = s1;
-                }
+                // Measure access time for __evicted__ x
+                self.write_set(&ev_set)?;
+                let (_, t1) = self.conn.read_timed(x)?;
+                
+                // Remove random entry
+                let &s = ev_set.iter().nth(rnd.gen_range(0, ev_set.len())).unwrap();
+                ev_set.remove(&s);
 
-                self.write_set(&ev_set);
-                let (_, t2) = self.conn.read_timed(x).unwrap();
+                // Measure access time for potentially __not evicted__ x 
+                // We assure that `x` is in the cache
+                self.conn.write(x, &rand::random())?;
+                self.write_set(&ev_set)?;
+                let (_, t2) = self.conn.read_timed(x)?;
 
-                if t1 - t2 <= self.params.threshold {
+                // If we `t2` is so much lower than `t1`, then `x` has not been evicted from the cache
+                if t1 - t2 >= self.params.threshold {
                     ev_set.insert(s);
                 }
 
@@ -375,20 +316,17 @@ pub mod test {
 
         fn write_set(&mut self, s: &EvictionSet) -> Result<()> {
             for addr in s.iter() {
-                if let Err(m) = self.conn.write(*addr, &0) {
-                    return Err(m);
-                }
+                self.conn.write(*addr, &rand::random())?;
             }
+    
             Ok(())
         }
-
+    
         fn write_set_except(&mut self, s: &EvictionSet, s_rm: &EvictionSet) -> Result<()> {
-            // UGLY: can make it with Iterators?
             for &x in s.iter().filter(|x| !s_rm.contains(x)) {
-                if let Err(s) = self.conn.write(x, &0) {
-                    return Err(s);
-                }
+                self.conn.write(x, &rand::random())?;
             }
+    
             Ok(())
         }
     }

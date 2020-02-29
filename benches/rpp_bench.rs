@@ -3,9 +3,9 @@ use netcat::rpp::RPP;
 use netcat::connection::local::*;
 
 pub fn rpp_bench(c: &mut Criterion) {
-    let mut group = c.benchmark_group("RPP benchmark");
+    let mut group = c.benchmark_group("RRIME+PROBE benchmark");
 
-    group.sample_size(20);
+    group.sample_size(100);
 
     group.bench_function("RPP bench", |b| {
         b.iter(|| {
