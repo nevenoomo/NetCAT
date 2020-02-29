@@ -1,8 +1,8 @@
 use ibverbs;
-use std::net;
-use std::env;
 use netcat::connection::rdma::RdmaPrimitive;
+use std::env;
 use std::io::Error;
+use std::net;
 
 const BUF_SIZE: usize = 8388608; // 8 MB
 const ADDR_KEY: &str = "RDMA_ADDR";
@@ -39,26 +39,27 @@ fn main() {
         .open()
         .unwrap_or_else(|e| panic!("ERROR: aquiring RDMA context failed: {}", e));
 
-    let dev_attr = ctx.clone()
+    let dev_attr = ctx
+        .clone()
         .query_device()
         .unwrap_or_else(|e| panic!("ERROR: cannot get device attributes: {}", e));
 
     // Create a protection domain
-    let pd = ctx.clone()
+    let pd = ctx
+        .clone()
         .alloc_pd()
         .unwrap_or_else(|_| panic!("ERROR: allocating Protection Domain failed"));
 
     // Create Complition Queue
-    let cq = ctx.clone()
+    let cq = ctx
+        .clone()
         .create_cq(dev_attr.max_cqe, 0)
         .unwrap_or_else(|e| panic!("ERROR: creating Completion Queue failed: {}", e));
 
     // here we need to allocate memory and register a memory region just for RDMA porposes
-    let mut mr = pd
-        .allocate::<RdmaPrimitive>(BUF_SIZE)
-        .unwrap_or_else(|e| {
-            panic!("ERROR: registering Memory Region failed: {}", e);
-        });
+    let mut mr = pd.allocate::<RdmaPrimitive>(BUF_SIZE).unwrap_or_else(|e| {
+        panic!("ERROR: registering Memory Region failed: {}", e);
+    });
 
     let laddr = (&mr[0] as *const RdmaPrimitive) as u64;
 
@@ -78,26 +79,38 @@ fn main() {
     let addr = env::var(ADDR_KEY.to_string()).unwrap_or("127.0.0.1:9003".to_string());
 
     let listner = net::TcpListener::bind(addr).expect("Listener failed");
-    let (mut stream, addr) = listner.accept().expect("Accepting failed");
-    
-    println!("Client connected!"); 
-    
+    let (stream, _addr) = listner.accept().expect("Accepting failed");
+
+    println!("Client connected!");
     let read_stream = stream.try_clone().expect("could not clone stream");
 
     // This looks so much better.
-    let mut rmsg: ibverbs::EndpointMsg = bincode::deserialize_from(read_stream)
+    let rmsg: ibverbs::EndpointMsg = bincode::deserialize_from(read_stream)
         .unwrap_or_else(|e| panic!("ERROR: failed to recieve data: {}", e));
-    
-    let rkey = rmsg.rkey;
-    let raddr = rmsg.raddr;
+    let _rkey = rmsg.rkey;
+    let _raddr = rmsg.raddr;
     let rendpoint = rmsg.into();
 
-    bincode::serialize_into(stream, &msg);
+    bincode::serialize_into(stream, &msg).unwrap();
 
-    let qp = qp_init
+    let _qp = qp_init
         .handshake(rendpoint)
         .unwrap_or_else(|e| panic!("ERROR: failed to handshake: {}", e));
 
     println!("RDMA handshake successfull");
-    loop{}
+    test(&mut mr);
+}
+
+fn test<T>(mr: &mut ibverbs::MemoryRegion<T>)
+where
+    T: Default + PartialEq + Copy + std::fmt::Display,
+{
+    let initial = Default::default();
+    mr[0] = initial;
+
+    loop {
+        if mr[0] != initial {
+            println!("Someone has written to the memory region, got: {}", mr[0]);
+        }
+    }
 }
