@@ -17,7 +17,7 @@ pub static DELTA: usize = 30;
 pub static MAX_RETRY: usize = 100;
 
 type Address = usize;
-type Contents = u64;
+type Contents = u8;
 
 /// # EvictionSet
 /// EvictionSet
@@ -137,7 +137,7 @@ impl RPP {
                 while cnt < MAX_RETRY {
                     match self.conn.read_timed(*addr) {
                         Ok(l) => {
-                            lat = l;
+                            lat = l.1;
                             break;
                         }
                         Err(e) => err = e,
@@ -165,13 +165,13 @@ impl RPP {
                     // Measure hit time for x
             self.conn.write(*x, &0)?;
 
-            let t1 = self.conn.read_timed(*x)?;
+            let (_, t1) = self.conn.read_timed(*x)?;
 
             // Potentially take x from the main memory
             sub_set.remove(&x);
             while self.write_set(&sub_set).is_err() {}
 
-            let t2 = self.conn.read_timed(*x)?;
+            let (_, t2) = self.conn.read_timed(*x)?;
 
             // TODO: dynamic thresh hold
             if t2 - t1 > self.params.threshold && sub_set.len() >= self.params.lines_per_set {
@@ -200,12 +200,12 @@ impl RPP {
             // Measure cache hit time for x
             self.conn.write(*x, &0)?;
 
-            let t1 = self.conn.read_timed(*x)?;
+            let (_, t1) = self.conn.read_timed(*x)?;
 
             // potentially read x from the main memory
             self.write_set_except(s, &s_rm)?;
 
-            let t2 = self.conn.read_timed(*x)?;
+            let (_, t2) = self.conn.read_timed(*x)?;
 
             // is x still evicted?
             if t2 - t1 > self.params.threshold {
@@ -238,7 +238,7 @@ impl RPP {
                 break;
             }
 
-            let t1 = match self.conn.read_timed(x) {
+            let (_, t1) = match self.conn.read_timed(x) {
                 Ok(t) => t,
                 // pass the error up
                 Err(_) => {
@@ -252,7 +252,7 @@ impl RPP {
                 error = true;
                 break;
             }
-            let t2 = match self.conn.read_timed(x) {
+            let (_, t2) = match self.conn.read_timed(x) {
                 Ok(t) => t,
                 // pass the error up
                 Err(_) => {
@@ -300,7 +300,6 @@ impl RPP {
 
 pub mod test {
     use super::*;
-    use crate::connection::local::LocalMemoryConnector;
     use crate::connection::MemoryConnector;
     use rand;
     use rand::Rng;
@@ -315,7 +314,7 @@ pub mod test {
 
     impl NaiveRpp {
         pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>) -> NaiveRpp {
-            let mut rpp = NaiveRpp {
+            let rpp = NaiveRpp {
                 params: Params::new(
                     NUM_OF_SETS,
                     BUFF_LEN,
@@ -348,7 +347,7 @@ pub mod test {
                 println!("Iteration: {}", i);
                 i += 1;
                 self.write_set(&ev_set);
-                let t1 = self.conn.read_timed(x).unwrap();
+                let (_, t1) = self.conn.read_timed(x).unwrap();
                 let s;
                 {
                     let s1 = ev_set
@@ -362,7 +361,7 @@ pub mod test {
                 }
 
                 self.write_set(&ev_set);
-                let t2 = self.conn.read_timed(x).unwrap();
+                let (_, t2) = self.conn.read_timed(x).unwrap();
 
                 if t1 - t2 <= self.params.threshold {
                     ev_set.insert(s);

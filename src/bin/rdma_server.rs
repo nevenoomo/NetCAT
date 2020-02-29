@@ -112,6 +112,7 @@ where
     loop {
         if mr[0] != initial {
             println!("Someone has written to the memory region, got: {}", mr[0]);
+            mr[0] = initial;
         }
     }
 }

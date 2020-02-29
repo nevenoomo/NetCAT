@@ -311,7 +311,7 @@ dependencies = [
 [[package]]
 name = "ibverbs"
 version = "0.4.2"
-source = "git+https://github.com/nevenoomo/rust-ibverbs#b104f573b578bfd914157ed006fb77a5f0745e2b"
+source = "git+https://github.com/nevenoomo/rust-ibverbs#c5b718a946140a87290b064fb8de08ce81acaa93"
 dependencies = [
  "bindgen 0.36.1 (registry+https://github.com/rust-lang/crates.io-index)",
  "serde 1.0.104 (registry+https://github.com/rust-lang/crates.io-index)",

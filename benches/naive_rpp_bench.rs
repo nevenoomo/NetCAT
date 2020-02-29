@@ -13,7 +13,7 @@ pub fn rpp_bench(c: &mut Criterion) {
 
             let mut naive_rpp = NaiveRpp::new(conn);
 
-            naive_rpp.naive_build_set();
+            naive_rpp.naive_build_set().unwrap();
         })
     });
 }

@@ -7,6 +7,7 @@ use ibverbs;
 use std::io::{Error, ErrorKind, Result, Write};
 use std::net;
 use std::sync::Arc;
+use std::sync::RwLock;
 use std::time::Instant;
 
 const LOCAL_BUF_SIZE: usize = 4096;
@@ -34,7 +35,7 @@ pub struct RdmaServerConnector {
     // field order matters!!! Otherwise will panic on drop.
     iqp: InitializedQp,
     cq: Arc<ibverbs::CompletionQueue>,
-    mr: Arc<ibverbs::MemoryRegion<RdmaPrimitive>>,
+    mr: RwLock<ibverbs::MemoryRegion<RdmaPrimitive>>,
     pd: Arc<ibverbs::ProtectionDomain>,
     ctx: Arc<ibverbs::Context>,
 }
@@ -104,10 +105,10 @@ impl RdmaServerConnector {
 
     fn register_mr(
         pd: &ibverbs::ProtectionDomain,
-    ) -> Result<Arc<ibverbs::MemoryRegion<RdmaPrimitive>>> {
+    ) -> Result<RwLock<ibverbs::MemoryRegion<RdmaPrimitive>>> {
         // here we need to allocate memory and register a memory region just for RDMA porposes
         match pd.allocate::<RdmaPrimitive>(LOCAL_BUF_SIZE) {
-            Ok(mr) => Ok(Arc::new(mr)),
+            Ok(mr) => Ok(RwLock::new(mr)),
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Other,
@@ -125,7 +126,7 @@ impl RdmaServerConnector {
         laddr: ibverbs::RemoteAddr,
     ) -> Result<InitializedQp> {
         let qp_init = {
-            let qp_builder = pd.create_qp(cq, cq, ibverbs::ibv_qp_type::IBV_QPT_RC); // client access flags default to ALLOW_LOCAL_WRITES which is ok 
+            let qp_builder = pd.create_qp(cq, cq, ibverbs::ibv_qp_type::IBV_QPT_RC); // client access flags default to ALLOW_LOCAL_WRITES which is ok
             match qp_builder.build() {
                 Ok(qp) => qp,
                 Err(e) => {
@@ -226,8 +227,8 @@ impl RdmaServerConnector {
         let pd = Self::aquire_pd(ctx.clone())?;
         let cq = Self::aquire_cq(ctx.clone())?;
         let mr = Self::register_mr(&pd)?;
-        let lkey = mr.rkey();
-        let laddr = ibverbs::RemoteAddr((&mr[0] as *const RdmaPrimitive) as u64);
+        let lkey = mr.read().unwrap().rkey();
+        let laddr = ibverbs::RemoteAddr((&(mr.read().unwrap())[0] as *const RdmaPrimitive) as u64);
         let iqp = Self::setup_qp(addr, &pd, &cq, lkey, laddr)?; //DEBUG: panics here
 
         Ok(RdmaServerConnector {
@@ -280,17 +281,51 @@ impl RdmaServerConnector {
 
     fn post_read(&self, addr: u64) -> Result<()> {
         unsafe {
-            self.iqp
-                .qp
-                .post_read_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, true)
+            self.iqp.qp.post_read_single(
+                &self.mr.read().unwrap(),
+                addr,
+                self.iqp.rkey.0,
+                WR_ID,
+                true,
+            )
         }
     }
 
     fn post_write(&self, addr: u64) -> Result<()> {
         unsafe {
-            self.iqp
-                .qp
-                .post_write_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, true)
+            self.iqp.qp.post_write_single(
+                &self.mr.read().unwrap(),
+                addr,
+                self.iqp.rkey.0,
+                WR_ID,
+                true,
+            )
+        }
+    }
+
+    fn post_read_buf(&self, addr: u64, n: usize) -> Result<()>{
+        unsafe {
+            self.iqp.qp.post_read_buf(
+                &self.mr.read().unwrap(),
+                n,
+                addr,
+                self.iqp.rkey.0,
+                WR_ID,
+                true,
+            )
+        }
+    }
+
+    fn post_write_buf(&self, addr: u64, n: usize) -> Result<()>{
+        unsafe {
+            self.iqp.qp.post_write_buf(
+                &self.mr.read().unwrap(),
+                n,
+                addr,
+                self.iqp.rkey.0,
+                WR_ID,
+                true,
+            )
         }
     }
 
@@ -308,9 +343,9 @@ impl RdmaServerConnector {
             if completed.is_empty() {
                 continue;
             }
-            match completed.iter().find(|wc| wc.wr_id() == WR_ID){
+            match completed.iter().find(|wc| wc.wr_id() == WR_ID) {
                 Some(_) => return Ok(()),
-                None => continue //TODO: maybe pass error here
+                None => continue, //TODO: maybe pass error here
             }
         }
     }
@@ -319,42 +354,99 @@ impl RdmaServerConnector {
 impl MemoryConnector for RdmaServerConnector {
     type Item = RdmaPrimitive;
 
-    /// Allocate buffer with a given size
-    fn allocate(&mut self, size: usize) {}
+    fn allocate(&mut self, _size: usize) {}
 
-    /// Read memory region from the given offset. If successful, then item is returned, else - the error message is returned.
     fn read(&self, ofs: usize) -> Result<Self::Item> {
         let mut completions = [ibverbs::ibv_wc::default(); 16];
         self.post_read(self.iqp.raddr.0 + (ofs as u64))?;
         self.poll_cq_is_done(&mut completions)?;
 
-        Ok(self.mr[0])
+        Ok(self.mr.read().unwrap()[0])
     }
 
-    /// Read memory region from the given offset. If successful, then latency is returned, else - the error message is returned.
-    fn read_timed(&self, ofs: usize) -> Result<Time> {
+    fn read_timed(&self, ofs: usize) -> Result<(Self::Item, Time)> {
         let now = Instant::now();
-        self.read(ofs)?;
+        let item = self.read(ofs)?; // allocation time is nearly constant, thus it won't affect measurements
         let elapsed = now.elapsed().as_nanos();
 
-        Ok(elapsed)
+        Ok((item, elapsed))
     }
 
-    /// Write memory region from the given offset. If successful, then nothing is returned, else - the error message is returned.
-    fn write(&mut self, ofs: usize, _what: &Self::Item) -> Result<()> {
+    fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()> {
         let mut completions = [ibverbs::ibv_wc::default(); 16];
+        let mut buf = match self.mr.write() {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "ERROR: could not aquire write lock",
+                ))
+            }
+        };
+        buf[0] = *what;
+
         self.post_write(self.iqp.raddr.0 + (ofs as u64))?;
         self.poll_cq_is_done(&mut completions)?;
 
         Ok(())
     }
 
-    /// Write memory region from the given offset. If successful, then latency is returned, else - the error message is returned.
-    fn write_timed(&mut self, ofs: usize, _what: &Self::Item) -> Result<Time> {
+    fn write_timed(&mut self, ofs: usize, what: &Self::Item) -> Result<Time> {
         let now = Instant::now();
-        self.write(ofs, _what)?;
+        self.write(ofs, what)?;
         let elapsed = now.elapsed().as_nanos();
 
         Ok(elapsed)
+    }
+
+    fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize>{
+        let mut completions = [ibverbs::ibv_wc::default(); 16];
+
+        self.post_read_buf(self.iqp.raddr.0 + (ofs as u64), buf.len())?;
+        self.poll_cq_is_done(&mut completions)?;
+
+        let src = self.mr.read().unwrap();
+        buf.copy_from_slice(&src[..buf.len()]);
+
+        Ok(buf.len())
+    }
+
+    fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize,Time)>{
+        let now = Instant::now();
+        let n = self.read_buf(ofs, buf)?; // allocation time is nearly constant, thus it won't affect measurements
+        let elapsed = now.elapsed().as_nanos();
+
+        Ok((n, elapsed))
+    }
+
+    fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize>{
+        let mut completions = [ibverbs::ibv_wc::default(); 16];
+        let mut dst = match self.mr.write() {
+            Ok(b) => b,
+            Err(_) => {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "ERROR: could not aquire write lock",
+                ))
+            }
+        };
+        (&mut dst[..buf.len()]).copy_from_slice(buf);
+
+        self.post_write_buf(self.iqp.raddr.0 + (ofs as u64), buf.len())?;
+        self.poll_cq_is_done(&mut completions)?;
+
+        Ok(buf.len())
+    }
+
+    fn write_buf_timed(
+        &mut self,
+        ofs: usize,
+        buf: &[Self::Item],
+    ) -> Result<(usize, Time)>{
+        let now = Instant::now();
+        let n = self.write_buf(ofs, buf)?;
+        let elapsed = now.elapsed().as_nanos();
+
+        Ok((n, elapsed))
     }
 }

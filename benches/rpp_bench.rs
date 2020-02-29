@@ -13,7 +13,7 @@ pub fn rpp_bench(c: &mut Criterion) {
 
             let mut rpp = RPP::new(conn);
 
-            rpp.build_set();
+            rpp.build_set().unwrap();
         })
     });
 }
