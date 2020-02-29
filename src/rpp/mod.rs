@@ -163,7 +163,7 @@ impl RPP {
                 })
                 .0; // Take the key from the pair (which is an address with the biggest latency)
                     // Measure hit time for x
-            self.conn.write(*x)?;
+            self.conn.write(*x, &0)?;
 
             let t1 = self.conn.read_timed(*x)?;
 
@@ -198,7 +198,7 @@ impl RPP {
             let s_rm: HashSet<Address> = s.iter().take(n).map(|&x| x).collect();
 
             // Measure cache hit time for x
-            self.conn.write(*x)?;
+            self.conn.write(*x, &0)?;
 
             let t1 = self.conn.read_timed(*x)?;
 
@@ -233,7 +233,7 @@ impl RPP {
 
         for &x in addrs.iter() {
             // measure x hit time
-            if self.conn.write(x).is_err() {
+            if self.conn.write(x, &0).is_err() {
                 error = true;
                 break;
             }
@@ -279,7 +279,7 @@ impl RPP {
 
     fn write_set(&mut self, s: &EvictionSet) -> Result<()> {
         for addr in s.iter() {
-            if let Err(m) = self.conn.write(*addr) {
+            if let Err(m) = self.conn.write(*addr, &0) {
                 return Err(m);
             }
         }
@@ -290,7 +290,7 @@ impl RPP {
     fn write_set_except(&mut self, s: &EvictionSet, s_rm: &EvictionSet) -> Result<()> {
         // UGLY: can make it with Iterators?
         for &x in s.iter().filter(|x| !s_rm.contains(x)) {
-            if let Err(s) = self.conn.write(x) {
+            if let Err(s) = self.conn.write(x, &0) {
                 return Err(s);
             }
         }
@@ -376,7 +376,7 @@ pub mod test {
 
         fn write_set(&mut self, s: &EvictionSet) -> Result<()> {
             for addr in s.iter() {
-                if let Err(m) = self.conn.write(*addr) {
+                if let Err(m) = self.conn.write(*addr, &0) {
                     return Err(m);
                 }
             }
@@ -386,7 +386,7 @@ pub mod test {
         fn write_set_except(&mut self, s: &EvictionSet, s_rm: &EvictionSet) -> Result<()> {
             // UGLY: can make it with Iterators?
             for &x in s.iter().filter(|x| !s_rm.contains(x)) {
-                if let Err(s) = self.conn.write(x) {
+                if let Err(s) = self.conn.write(x, &0) {
                     return Err(s);
                 }
             }

@@ -7,8 +7,11 @@ use ibverbs;
 use std::io::{Error, ErrorKind, Result, Write};
 use std::net;
 use std::sync::Arc;
+use std::time::Instant;
 
 const LOCAL_BUF_SIZE: usize = 4096;
+const WR_ID: u64 = 12949723411804112106;
+const POLL_RETRY_TIMES: u64 = 120000;
 pub type RdmaPrimitive = u8;
 
 struct InitializedQp {
@@ -28,7 +31,8 @@ impl InitializedQp {
 }
 
 /// Holds all of the context for a single connection
-pub struct RdmaServerConnector { // field order matters!!! Otherwise will panic on drop.
+pub struct RdmaServerConnector {
+    // field order matters!!! Otherwise will panic on drop.
     iqp: InitializedQp,
     cq: Arc<ibverbs::CompletionQueue>,
     mr: Arc<ibverbs::MemoryRegion<RdmaPrimitive>>,
@@ -99,7 +103,9 @@ impl RdmaServerConnector {
         }
     }
 
-    fn register_mr(pd: &ibverbs::ProtectionDomain) -> Result<Arc<ibverbs::MemoryRegion<RdmaPrimitive>>> {
+    fn register_mr(
+        pd: &ibverbs::ProtectionDomain,
+    ) -> Result<Arc<ibverbs::MemoryRegion<RdmaPrimitive>>> {
         // here we need to allocate memory and register a memory region just for RDMA porposes
         match pd.allocate::<RdmaPrimitive>(LOCAL_BUF_SIZE) {
             Ok(mr) => Ok(Arc::new(mr)),
@@ -140,7 +146,11 @@ impl RdmaServerConnector {
         let rendpoint = rmsg.into();
 
         match qp_init.handshake(rendpoint) {
-            Ok(qp) => Ok(InitializedQp { qp : Arc::new(qp), rkey, raddr }),
+            Ok(qp) => Ok(InitializedQp {
+                qp: Arc::new(qp),
+                rkey,
+                raddr,
+            }),
             Err(e) => {
                 return Err(Error::new(
                     ErrorKind::Other,
@@ -221,7 +231,7 @@ impl RdmaServerConnector {
         let laddr = ibverbs::RemoteAddr((&mr[0] as *const RdmaPrimitive) as u64);
         let iqp = Self::setup_qp(addr, &pd, &cq, lkey, laddr)?; //DEBUG: panics here
 
-        Ok(RdmaServerConnector{
+        Ok(RdmaServerConnector {
             ctx,
             pd,
             cq,
@@ -268,6 +278,44 @@ impl RdmaServerConnector {
             )),
         }
     }
+
+    fn post_read(&self, addr: u64) -> Result<()> {
+        unsafe {
+            self.iqp
+                .qp
+                .post_read_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, false)
+        }
+    }
+
+    fn post_write(&self, addr: u64) -> Result<()> {
+        unsafe {
+            self.iqp
+                .qp
+                .post_write_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, false)
+        }
+    }
+
+    fn poll_cq_is_done(&self, compl: &mut [ibverbs::ffi::ibv_wc]) -> Result<()> {
+        for i in 0..POLL_RETRY_TIMES {
+            let completed = match self.cq.poll(compl) {
+                Ok(o) => o,
+                Err(_) => {
+                    return Err(Error::new(
+                        ErrorKind::Other,
+                        format!("ERROR: could not poll CQ: {}", Error::last_os_error()),
+                    ))
+                }
+            };
+            if completed.is_empty() {
+                continue;
+            }
+            match completed.iter().find(|wc| wc.wr_id() == WR_ID){
+                Some(_) => return Ok(()),
+                None => continue //TODO: maybe pass error here
+            }
+        }
+        Err(Error::new(ErrorKind::Other, "ERROR: polling CQ time exceeded"))
+    }
 }
 
 impl MemoryConnector for RdmaServerConnector {
@@ -278,21 +326,37 @@ impl MemoryConnector for RdmaServerConnector {
 
     /// Read memory region from the given offset. If successful, then item is returned, else - the error message is returned.
     fn read(&self, ofs: usize) -> Result<Self::Item> {
-        Ok(Default::default())
+        let mut completions = [ibverbs::ibv_wc::default(); 16];
+        self.post_read(self.iqp.raddr.0 + (ofs as u64))?;
+        self.poll_cq_is_done(&mut completions)?;
+
+        Ok(self.mr[0])
     }
 
     /// Read memory region from the given offset. If successful, then latency is returned, else - the error message is returned.
     fn read_timed(&self, ofs: usize) -> Result<Time> {
-        Ok(Default::default())
+        let now = Instant::now();
+        self.read(ofs)?;
+        let elapsed = now.elapsed().as_nanos();
+
+        Ok(elapsed)
     }
 
     /// Write memory region from the given offset. If successful, then nothing is returned, else - the error message is returned.
-    fn write(&mut self, ofs: usize) -> Result<()> {
-        Ok(Default::default())
+    fn write(&mut self, ofs: usize, _what: &Self::Item) -> Result<()> {
+        let mut completions = [ibverbs::ibv_wc::default(); 16];
+        self.post_write(self.iqp.raddr.0 + (ofs as u64))?;
+        self.poll_cq_is_done(&mut completions)?;
+
+        Ok(())
     }
 
     /// Write memory region from the given offset. If successful, then latency is returned, else - the error message is returned.
-    fn write_timed(&mut self, ofs: usize) -> Result<Time> {
-        Ok(Default::default())
+    fn write_timed(&mut self, ofs: usize, _what: &Self::Item) -> Result<Time> {
+        let now = Instant::now();
+        self.write(ofs, _what)?;
+        let elapsed = now.elapsed().as_nanos();
+
+        Ok(elapsed)
     }
 }

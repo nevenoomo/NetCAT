@@ -2,7 +2,7 @@
 //! This module provides a number of uniform interfaces for different connections.
 pub mod local;
 pub mod rdma;
-pub type Time = i128;
+pub type Time = u128;
 
 use std::io::Result;
 
@@ -21,8 +21,8 @@ pub trait MemoryConnector {
     fn read_timed(&self, ofs: usize) -> Result<Time>;
 
     /// Write memory region from the given offset. If successful, then nothing is returned, else - the error message is returned.
-    fn write(&mut self, ofs: usize) -> Result<()>; 
+    fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()>; 
 
     /// Write memory region from the given offset. If successful, then latency is returned, else - the error message is returned.
-    fn write_timed(&mut self, ofs: usize) -> Result<Time>;
+    fn write_timed(&mut self, ofs: usize, what: &Self::Item) -> Result<Time>;
 }

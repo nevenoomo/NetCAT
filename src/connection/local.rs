@@ -24,7 +24,7 @@ impl MemoryConnector for LocalMemoryConnector {
         Ok(self.buf[ofs] as u64)
     }
 
-    fn write(&mut self, ofs: usize) -> Result<()>{
+    fn write(&mut self, ofs: usize, _what: &Self::Item) -> Result<()>{
         self.buf[ofs] = 123; // does not matter what to write
 
         Ok(())
@@ -35,13 +35,13 @@ impl MemoryConnector for LocalMemoryConnector {
         self.read(ofs);
 
 
-        Ok(now.elapsed().unwrap().as_nanos() as i128)
+        Ok(now.elapsed().unwrap().as_nanos() as u128)
     }
 
-    fn write_timed(&mut self, ofs: usize) -> Result<Time>{
+    fn write_timed(&mut self, ofs: usize, _what: &Self::Item) -> Result<Time>{
         let now = std::time::SystemTime::now();
-        self.write(ofs);
+        self.write(ofs, &0);
 
-        Ok(now.elapsed().unwrap().as_nanos() as i128)
+        Ok(now.elapsed().unwrap().as_nanos() as u128)
     }
 }
