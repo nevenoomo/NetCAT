@@ -6,6 +6,7 @@ use std::net;
 
 const BUF_SIZE: usize = 8388608; // 8 MB
 const ADDR_KEY: &str = "RDMA_ADDR";
+const CTL_ADDR: &str = "10.0.2.4:9004";
 
 fn get_devs() -> ibverbs::DeviceList {
     ibverbs::devices().unwrap_or_else(|e| {
@@ -99,10 +100,13 @@ fn main() {
         .unwrap_or_else(|e| panic!("ERROR: failed to handshake: {}", e));
 
     println!("RDMA handshake successfull");
-    test(&mut mr);
+    #[cfg(not(feature = "clflush"))]
+    overwrite_check(&mut mr);
+    #[cfg(feature = "clflush")]
+    flush_on_command(&mut mr);
 }
 
-fn test<T>(mr: &mut ibverbs::MemoryRegion<T>)
+fn overwrite_check<T>(mr: &mut ibverbs::MemoryRegion<T>)
 where
     T: Default + PartialEq + Copy + std::fmt::Display,
 {
@@ -116,3 +120,22 @@ where
         }
     }
 }
+
+#[cfg(feature = "clflush")]
+fn flush_on_command<T>(mr: &mut ibverbs::MemoryRegion<T>) {
+    println!("Will evict with clflush");
+    use std::io::Read;
+    use netcat::connection::local::flush;
+    let addr = CTL_ADDR;
+    let mut buf = [0u8]; 
+
+    let listner = net::TcpListener::bind(addr).expect("Listener failed");
+    let (mut stream, _addr) = listner.accept().expect("Accepting failed");
+    stream.set_nonblocking(false).unwrap();
+    loop{
+        stream.read(&mut buf).expect("Cannot read from stream");
+        stream.write(&buf).expect("Cannot echo");
+        flush(&mr[..]);
+    }    
+}
+

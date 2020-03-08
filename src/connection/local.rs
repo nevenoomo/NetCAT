@@ -7,8 +7,16 @@ pub struct LocalMemoryConnector {
 
 impl LocalMemoryConnector {
     pub fn new() -> LocalMemoryConnector {
-        LocalMemoryConnector{
-            buf: Vec::new()
+        LocalMemoryConnector { buf: Vec::new() }
+    }
+}
+
+#[cfg(feature = "clflush")]
+pub fn flush<T>(buf: &[T]) {
+    for v in buf.iter() {
+        let p = (v as *const T).cast();
+        unsafe {
+            core::arch::x86_64::_mm_clflush(p);
         }
     }
 }
@@ -16,21 +24,21 @@ impl LocalMemoryConnector {
 impl MemoryConnector for LocalMemoryConnector {
     type Item = u8;
 
-    fn allocate(&mut self, size: usize){
+    fn allocate(&mut self, size: usize) {
         self.buf = vec![0u8; size];
     }
 
-    fn read(&self, ofs: usize) -> Result<Self::Item>{
+    fn read(&self, ofs: usize) -> Result<Self::Item> {
         Ok(self.buf[ofs])
     }
 
-    fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()>{
+    fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()> {
         self.buf[ofs] = *what;
 
         Ok(())
     }
 
-    fn read_timed(&self, ofs: usize) -> Result<(Self::Item, Time)>{
+    fn read_timed(&self, ofs: usize) -> Result<(Self::Item, Time)> {
         let now = std::time::SystemTime::now();
         let res = self.read(ofs)?;
         let elapsed = now.elapsed().unwrap().as_nanos();
@@ -38,7 +46,7 @@ impl MemoryConnector for LocalMemoryConnector {
         Ok((res, elapsed))
     }
 
-    fn write_timed(&mut self, ofs: usize, _what: &Self::Item) -> Result<Time>{
+    fn write_timed(&mut self, ofs: usize, _what: &Self::Item) -> Result<Time> {
         let now = std::time::SystemTime::now();
         self.write(ofs, &0)?;
         let elapsed = now.elapsed().unwrap().as_nanos();
@@ -46,13 +54,13 @@ impl MemoryConnector for LocalMemoryConnector {
         Ok(elapsed)
     }
 
-    fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize>{
-        buf.copy_from_slice(&self.buf[ofs..ofs+buf.len()]);
+    fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize> {
+        buf.copy_from_slice(&self.buf[ofs..ofs + buf.len()]);
 
         Ok(buf.len())
     }
 
-    fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize, Time)>{
+    fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize, Time)> {
         let now = std::time::SystemTime::now();
         let n = self.read_buf(ofs, buf)?;
         let elapsed = now.elapsed().unwrap().as_nanos();
@@ -60,13 +68,13 @@ impl MemoryConnector for LocalMemoryConnector {
         Ok((n, elapsed))
     }
 
-    fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize>{
-        (&mut self.buf[ofs..ofs+buf.len()]).copy_from_slice(buf);
+    fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize> {
+        (&mut self.buf[ofs..ofs + buf.len()]).copy_from_slice(buf);
 
         Ok(buf.len())
     }
 
-    fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)>{
+    fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)> {
         let now = std::time::SystemTime::now();
         let n = self.write_buf(ofs, buf)?;
         let elapsed = now.elapsed().unwrap().as_nanos();
