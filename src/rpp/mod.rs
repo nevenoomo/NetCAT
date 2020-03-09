@@ -4,18 +4,21 @@
 
 #![allow(dead_code)]
 use crate::connection::{MemoryConnector, Time};
+use hdrhistogram::Histogram;
 use rand;
 use std::cmp::min;
 use std::collections::{HashMap, HashSet};
 use std::io::Result;
 
-pub static NUM_OF_SETS: usize = 64;
-pub static BUFF_LEN: usize = 8388608; // 8 MiB
-pub static BYTES_PER_LINE: usize = 64;
-pub static LINES_PER_SET: usize = 12;
-pub static THRESHOLD: Time = 260;
-pub static DELTA: usize = 30;
-pub static MAX_RETRY: usize = 100;
+pub const NUM_OF_SETS: usize = 64;
+pub const BUFF_LEN: usize = 8388608; // 8 MiB
+pub const BYTES_PER_LINE: usize = 64;
+pub const LINES_PER_SET: usize = 12;
+pub const THRESHOLD: Time = 260;
+pub const DELTA: usize = 30;
+pub const MAX_RETRY: usize = 100;
+pub const TIMINGS_INIT_FILL: usize = 10000;
+pub const PERCENTILE: f64 = 1.0; // only 1% of the data lies behind the value
 
 type Address = usize;
 type Contents = u8;
@@ -60,10 +63,13 @@ pub struct RPP {
     conn: Box<dyn MemoryConnector<Item = Contents>>,
     sets: Vec<EvictionSet>,
     addrs: HashSet<Address>,
+    timings: Histogram<u64>, // we will be using this to dynamically scale threshold
 }
 
 impl RPP {
     pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>) -> RPP {
+        let hist = Histogram::new(5).expect("could not create hist"); // 5 sets the precision and it is the maximum possible
+        
         let mut rpp = RPP {
             params: Params::new(
                 NUM_OF_SETS,
@@ -75,14 +81,18 @@ impl RPP {
             conn: conn,
             sets: Vec::with_capacity(NUM_OF_SETS),
             addrs: (0usize..BUFF_LEN).step_by(BYTES_PER_LINE).collect(),
+            timings: hist,
         };
-
+        
+        rpp.fill_hist();
         rpp.build_sets();
 
         rpp
     }
 
     pub fn with_params(conn: Box<dyn MemoryConnector<Item = Contents>>, params: Params) -> RPP {
+        let hist = Histogram::new(5).expect("could not create hist"); // 5 sets the precision and it is the maximum possible
+
         let mut rpp = RPP {
             params: params,
             conn: conn,
@@ -90,11 +100,43 @@ impl RPP {
             addrs: (0usize..params.num_of_sets)
                 .step_by(params.lines_per_set)
                 .collect(),
+            timings: hist,
         };
 
+        rpp.fill_hist();
         rpp.build_sets();
 
         rpp
+    }
+
+    fn fill_hist(&mut self) {
+        use rand::seq::IteratorRandom;
+        // we assume that the memory region is not cached
+        let mut rng = rand::thread_rng();
+
+        for &ofs in self.addrs.iter().choose_multiple(&mut rng, TIMINGS_INIT_FILL) {
+            // here we read from the main memory
+            let (_, t1) = self.conn.read_timed(ofs).expect("Could not read in hist");
+
+            // here we fist write the value to cache it and read again from cache
+            self.conn.write(ofs, &rand::random()).expect("Could not write for hist");
+            let (_, t2) = self.conn.read_timed(ofs).expect("Could not read in hist");
+
+            // we expect the latency from main memory to be bigger that from LLC
+            if t1 < t2 {
+                continue;
+            }
+
+            self.timings.record(t1 - t2).expect("Could not fill hist");
+        }
+    }
+
+    fn threshold(&self) -> Time {
+        self.timings.value_at_percentile(PERCENTILE)
+    }
+
+    fn record(&mut self, val: Time) {
+        self.timings.record(val).expect("Failed to record new timing");
     }
 
     fn build_sets(&mut self) {
@@ -143,9 +185,10 @@ impl RPP {
             self.write_set(&sub_set)?;
             let (_, t2) = self.conn.read_timed(x)?;
 
-            // TODO: dynamic threshhold
             // Determine if x got evicted from the cache by this set
-            if t2 - t1 > self.params.threshold {
+            let diff = t2 - t1; 
+            if diff > self.threshold() {
+                self.record(diff);
                 return Ok((Box::new(sub_set), x));
             }
 
@@ -185,7 +228,9 @@ impl RPP {
             let (_, t2) = self.conn.read_timed(x)?;
 
             // Determine if `x` got evicted by a reduced set S\S_rm
-            if t2 - t1 > self.params.threshold {
+            let diff = t2 - t1; 
+            if diff > self.threshold() {
+                self.record(diff);
                 // Truly remove S_rm from S
                 s.retain(|x| !s_rm.contains(x));
                 // Suring the next step we will try to remove 10 more addrs
@@ -218,7 +263,9 @@ impl RPP {
             let (_, t2) = self.conn.read_timed(x)?;
 
             // We evicted x? Then we do not need it anymore
-            if t2 - t1 > self.params.threshold {
+            let diff = t2 - t1; 
+            if diff > self.threshold() {
+                self.record(diff);
                 self.addrs.remove(&x);
             }
         }
@@ -240,94 +287,5 @@ impl RPP {
         }
 
         Ok(())
-    }
-}
-
-pub mod test {
-    use super::*;
-    use crate::connection::MemoryConnector;
-    use rand;
-    use rand::Rng;
-    use std::collections::HashSet;
-
-    pub struct NaiveRpp {
-        params: Params,
-        conn: Box<dyn MemoryConnector<Item = Contents>>,
-        sets: Vec<EvictionSet>,
-        addrs: HashSet<Address>,
-    }
-
-    impl NaiveRpp {
-        pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>) -> NaiveRpp {
-            let rpp = NaiveRpp {
-                params: Params::new(
-                    NUM_OF_SETS,
-                    BUFF_LEN,
-                    BYTES_PER_LINE,
-                    LINES_PER_SET,
-                    THRESHOLD,
-                ),
-                conn: conn,
-                sets: Vec::with_capacity(NUM_OF_SETS),
-                addrs: (0usize..BUFF_LEN).step_by(BYTES_PER_LINE).collect(),
-            };
-            rpp
-        }
-
-        pub fn naive_build_set(&mut self) -> Result<Box<EvictionSet>> {
-            self.conn.allocate(self.params.buff_len);
-            let mut rnd = rand::thread_rng();
-            let &x = self
-                .addrs
-                .iter()
-                .nth(rnd.gen_range(0, self.addrs.len()))
-                .unwrap();
-            let mut ev_set = self.addrs.clone();
-            let mut i = 0;
-
-            loop {
-                println!("Iteration: {}", i);
-                i += 1;
-
-                // Measure access time for __evicted__ x
-                self.write_set(&ev_set)?;
-                let (_, t1) = self.conn.read_timed(x)?;
-                
-                // Remove random entry
-                let &s = ev_set.iter().nth(rnd.gen_range(0, ev_set.len())).unwrap();
-                ev_set.remove(&s);
-
-                // Measure access time for potentially __not evicted__ x 
-                // We assure that `x` is in the cache
-                self.conn.write(x, &rand::random())?;
-                self.write_set(&ev_set)?;
-                let (_, t2) = self.conn.read_timed(x)?;
-
-                // If we `t2` is so much lower than `t1`, then `x` has not been evicted from the cache
-                if t1 - t2 >= self.params.threshold {
-                    ev_set.insert(s);
-                }
-
-                if ev_set.len() == 12 {
-                    return Ok(Box::new(ev_set));
-                }
-            }
-        }
-
-        fn write_set(&mut self, s: &EvictionSet) -> Result<()> {
-            for addr in s.iter() {
-                self.conn.write(*addr, &rand::random())?;
-            }
-    
-            Ok(())
-        }
-    
-        fn write_set_except(&mut self, s: &EvictionSet, s_rm: &EvictionSet) -> Result<()> {
-            for &x in s.iter().filter(|x| !s_rm.contains(x)) {
-                self.conn.write(x, &rand::random())?;
-            }
-    
-            Ok(())
-        }
     }
 }

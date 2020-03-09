@@ -2,7 +2,7 @@
 //! This module provides a number of uniform interfaces for different connections.
 pub mod local;
 pub mod rdma;
-pub type Time = u128;
+pub type Time = u64;
 
 use std::io::Result;
 

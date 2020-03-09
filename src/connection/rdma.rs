@@ -4,6 +4,7 @@
 use crate::connection::{MemoryConnector, Time};
 use bincode;
 use ibverbs;
+use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result, Write};
 use std::net;
 use std::sync::Arc;
@@ -367,7 +368,11 @@ impl MemoryConnector for RdmaServerConnector {
     fn read_timed(&self, ofs: usize) -> Result<(Self::Item, Time)> {
         let now = Instant::now();
         let item = self.read(ofs)?; // allocation time is nearly constant, thus it won't affect measurements
-        let elapsed = now.elapsed().as_nanos();
+        let elapsed = now
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(Time::max_value());
 
         Ok((item, elapsed))
     }
@@ -396,7 +401,11 @@ impl MemoryConnector for RdmaServerConnector {
     fn write_timed(&mut self, ofs: usize, what: &Self::Item) -> Result<Time> {
         let now = Instant::now();
         self.write(ofs, what)?;
-        let elapsed = now.elapsed().as_nanos();
+        let elapsed = now
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(Time::max_value());
 
         Ok(elapsed)
     }
@@ -416,7 +425,11 @@ impl MemoryConnector for RdmaServerConnector {
     fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize, Time)> {
         let now = Instant::now();
         let n = self.read_buf(ofs, buf)?; // allocation time is nearly constant, thus it won't affect measurements
-        let elapsed = now.elapsed().as_nanos();
+        let elapsed = now
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(Time::max_value());
 
         Ok((n, elapsed))
     }
@@ -445,7 +458,11 @@ impl MemoryConnector for RdmaServerConnector {
     fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)> {
         let now = Instant::now();
         let n = self.write_buf(ofs, buf)?;
-        let elapsed = now.elapsed().as_nanos();
+        let elapsed = now
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(Time::max_value());
 
         Ok((n, elapsed))
     }
