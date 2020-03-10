@@ -8,6 +8,7 @@ edition = "2018"
 
 [features]
 clflush = [] # use clflush for fast eviction
+local = []
 
 [dependencies]
 ibverbs = {git = "https://github.com/nevenoomo/rust-ibverbs"}

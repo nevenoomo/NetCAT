@@ -41,11 +41,10 @@ impl MemoryConnector for LocalMemoryConnector {
     }
 
     fn read_timed(&self, ofs: usize) -> Result<(Self::Item, Time)> {
-        let now = std::time::SystemTime::now();
+        let now = std::time::Instant::now();
         let res = self.read(ofs)?;
         let elapsed = now
             .elapsed()
-            .unwrap()
             .as_nanos()
             .try_into()
             .unwrap_or(Time::max_value());
@@ -53,11 +52,10 @@ impl MemoryConnector for LocalMemoryConnector {
     }
 
     fn write_timed(&mut self, ofs: usize, _what: &Self::Item) -> Result<Time> {
-        let now = std::time::SystemTime::now();
+        let now = std::time::Instant::now();
         self.write(ofs, &0)?;
         let elapsed = now
             .elapsed()
-            .unwrap()
             .as_nanos()
             .try_into()
             .unwrap_or(Time::max_value());
@@ -72,11 +70,10 @@ impl MemoryConnector for LocalMemoryConnector {
     }
 
     fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize, Time)> {
-        let now = std::time::SystemTime::now();
+        let now = std::time::Instant::now();
         let n = self.read_buf(ofs, buf)?;
         let elapsed = now
             .elapsed()
-            .unwrap()
             .as_nanos()
             .try_into()
             .unwrap_or(Time::max_value());
@@ -91,11 +88,10 @@ impl MemoryConnector for LocalMemoryConnector {
     }
 
     fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)> {
-        let now = std::time::SystemTime::now();
+        let now = std::time::Instant::now();
         let n = self.write_buf(ofs, buf)?;
         let elapsed = now
             .elapsed()
-            .unwrap()
             .as_nanos()
             .try_into()
             .unwrap_or(Time::max_value());
