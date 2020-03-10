@@ -12,7 +12,7 @@ use std::sync::RwLock;
 use std::time::Instant;
 
 const LOCAL_BUF_SIZE: usize = 4096;
-const WR_ID: u64 = 12949723411804112106;
+const WR_ID: u64 = 12_949_723_411_804_112_106; // some random value
 pub type RdmaPrimitive = u8;
 
 struct InitializedQp {
@@ -59,12 +59,10 @@ impl RdmaServerConnector {
         // Here the device is opened. Port (1) and GID are queried automaticaly
         match dev.open() {
             Ok(c) => Ok(c),
-            Err(e) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("ERROR: aquiring RDMA context failed: {}", e),
-                ))
-            }
+            Err(e) => Err(Error::new(
+                ErrorKind::Other,
+                format!("ERROR: aquiring RDMA context failed: {}", e),
+            )),
         }
     }
 
@@ -72,12 +70,10 @@ impl RdmaServerConnector {
         // Create a protection domain
         match ctx.alloc_pd() {
             Ok(pd) => Ok(Arc::new(pd)),
-            Err(_) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "ERROR: allocating Protection Domain failed",
-                ))
-            }
+            Err(_) => Err(Error::new(
+                ErrorKind::Other,
+                "ERROR: allocating Protection Domain failed",
+            )),
         }
     }
 
@@ -95,12 +91,10 @@ impl RdmaServerConnector {
         // Create Complition Queue
         match ctx.create_cq(dev_attr.max_cqe, 0) {
             Ok(cq) => Ok(Arc::new(cq)),
-            Err(e) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("ERROR: creating Completion Queue failed: {}", e),
-                ))
-            }
+            Err(e) => Err(Error::new(
+                ErrorKind::Other,
+                format!("ERROR: creating Completion Queue failed: {}", e),
+            )),
         }
     }
 
@@ -110,12 +104,10 @@ impl RdmaServerConnector {
         // here we need to allocate memory and register a memory region just for RDMA porposes
         match pd.allocate::<RdmaPrimitive>(LOCAL_BUF_SIZE) {
             Ok(mr) => Ok(RwLock::new(mr)),
-            Err(e) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("ERROR: registering Memory Region failed: {}", e),
-                ))
-            }
+            Err(e) => Err(Error::new(
+                ErrorKind::Other,
+                format!("ERROR: registering Memory Region failed: {}", e),
+            )),
         }
     }
 
@@ -152,12 +144,10 @@ impl RdmaServerConnector {
                 rkey,
                 raddr,
             }),
-            Err(e) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("ERROR: failed to handshake: {}", e),
-                ))
-            }
+            Err(e) => Err(Error::new(
+                ErrorKind::Other,
+                format!("ERROR: failed to handshake: {}", e),
+            )),
         }
     }
 

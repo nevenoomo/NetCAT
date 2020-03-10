@@ -4,7 +4,7 @@ use std::env;
 use std::io::Error;
 use std::net;
 
-const BUF_SIZE: usize = 8388608; // 8 MB
+const BUF_SIZE: usize = 8_388_608; // 8 MB
 const ADDR_KEY: &str = "RDMA_ADDR";
 
 fn get_devs() -> ibverbs::DeviceList {
@@ -52,7 +52,6 @@ fn main() {
 
     // Create Complition Queue
     let cq = ctx
-        .clone()
         .create_cq(dev_attr.max_cqe, 0)
         .unwrap_or_else(|e| panic!("ERROR: creating Completion Queue failed: {}", e));
 

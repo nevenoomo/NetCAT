@@ -2,6 +2,7 @@ use crate::connection::{MemoryConnector, Time};
 use std::convert::TryInto;
 use std::io::Result;
 
+#[derive(Default)]
 pub struct LocalMemoryConnector {
     buf: Vec<u8>,
 }

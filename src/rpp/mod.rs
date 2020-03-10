@@ -11,14 +11,15 @@ use std::collections::{HashMap, HashSet};
 use std::io::Result;
 
 pub const NUM_OF_SETS: usize = 64;
-pub const BUFF_LEN: usize = 8388608; // 8 MiB
+pub const BUFF_LEN: usize = 8_388_608; // 8 MiB
 pub const BYTES_PER_LINE: usize = 64;
 pub const LINES_PER_SET: usize = 12;
 pub const THRESHOLD: Time = 260;
 pub const DELTA: usize = 30;
 pub const MAX_RETRY: usize = 100;
 pub const TIMINGS_INIT_FILL: usize = 10000;
-pub const PERCENTILE: f64 = 1.0; // only 1% of the data lies behind the value
+pub const MEDIAN_PERCENTILE: f64 = 50.0; // median is by definition a 50th percentile
+                                         // pub const PERCENTILE: f64 = 1.0; // only 1% of the data lies behind the value
 
 type Address = usize;
 type Contents = u8;
@@ -69,7 +70,6 @@ pub struct RPP {
 impl RPP {
     pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>) -> RPP {
         let hist = Histogram::new(5).expect("could not create hist"); // 5 sets the precision and it is the maximum possible
-        
         let mut rpp = RPP {
             params: Params::new(
                 NUM_OF_SETS,
@@ -78,12 +78,11 @@ impl RPP {
                 LINES_PER_SET,
                 THRESHOLD,
             ),
-            conn: conn,
+            conn,
             sets: Vec::with_capacity(NUM_OF_SETS),
             addrs: (0usize..BUFF_LEN).step_by(BYTES_PER_LINE).collect(),
             timings: hist,
         };
-        
         rpp.fill_hist();
         rpp.build_sets();
 
@@ -94,8 +93,8 @@ impl RPP {
         let hist = Histogram::new(5).expect("could not create hist"); // 5 sets the precision and it is the maximum possible
 
         let mut rpp = RPP {
-            params: params,
-            conn: conn,
+            params,
+            conn,
             sets: Vec::with_capacity(params.num_of_sets),
             addrs: (0usize..params.num_of_sets)
                 .step_by(params.lines_per_set)
@@ -114,12 +113,18 @@ impl RPP {
         // we assume that the memory region is not cached
         let mut rng = rand::thread_rng();
 
-        for &ofs in self.addrs.iter().choose_multiple(&mut rng, TIMINGS_INIT_FILL) {
+        for &ofs in self
+            .addrs
+            .iter()
+            .choose_multiple(&mut rng, TIMINGS_INIT_FILL)
+        {
             // here we read from the main memory
             let (_, t1) = self.conn.read_timed(ofs).expect("Could not read in hist");
 
             // here we fist write the value to cache it and read again from cache
-            self.conn.write(ofs, &rand::random()).expect("Could not write for hist");
+            self.conn
+                .write(ofs, &rand::random())
+                .expect("Could not write for hist");
             let (_, t2) = self.conn.read_timed(ofs).expect("Could not read in hist");
 
             // we expect the latency from main memory to be bigger that from LLC
@@ -127,16 +132,28 @@ impl RPP {
                 continue;
             }
 
-            self.timings.record(t1 - t2).expect("Could not fill hist");
+            // measure hit time again
+            self.conn
+                .write(ofs, &rand::random())
+                .expect("Could not write for hist");
+            let (_, t3) = self.conn.read_timed(ofs).expect("Could not read in hist");
+
+            let hit_miss = t1 - t2;
+            let hit_hit = if t2 > t3 { t2 - t3 } else { t3 - t2 };
+
+            self.timings.record(hit_miss).expect("Could not fill hist");
+            self.timings.record(hit_hit).expect("Could not fill hist");
         }
     }
 
     fn threshold(&self) -> Time {
-        self.timings.value_at_percentile(PERCENTILE)
+        self.timings.value_at_percentile(MEDIAN_PERCENTILE)
     }
 
     fn record(&mut self, val: Time) {
-        self.timings.record(val).expect("Failed to record new timing");
+        self.timings
+            .record(val)
+            .expect("Failed to record new timing");
     }
 
     fn build_sets(&mut self) {
@@ -158,7 +175,7 @@ impl RPP {
         let mut latencies = HashMap::with_capacity(self.params.buff_len / 4);
 
         loop {
-            let mut sub_set = self.addrs.iter().take(n).map(|&x| x).collect();
+            let mut sub_set = self.addrs.iter().take(n).copied().collect();
             // First, we write the whole buffer. Some addrs might get evicted by the consequent writes.
             // If this fails, then repeating won't help
             self.write_set(&sub_set)?;
@@ -185,10 +202,15 @@ impl RPP {
             self.write_set(&sub_set)?;
             let (_, t2) = self.conn.read_timed(x)?;
 
+            // Both t1 and t2 are from cache
+            if t1 > t2 {
+                self.record(t1 - t2);
+                continue;
+            }
             // Determine if x got evicted from the cache by this set
-            let diff = t2 - t1; 
+            let diff = t2 - t1;
+            self.record(diff);
             if diff > self.threshold() {
-                self.record(diff);
                 return Ok((Box::new(sub_set), x));
             }
 
@@ -217,7 +239,7 @@ impl RPP {
             } else {
                 min(n, s.len() / 2)
             };
-            let s_rm: EvictionSet = s.iter().take(n).map(|&x| x).collect();
+            let s_rm: EvictionSet = s.iter().take(n).copied().collect();
 
             // Measure cache hit time for x
             self.conn.write(x, &rand::random())?;
@@ -227,10 +249,16 @@ impl RPP {
             self.write_set_except(s, &s_rm)?;
             let (_, t2) = self.conn.read_timed(x)?;
 
+            // Both t1 and t2 are from cache
+            if t1 > t2 {
+                self.record(t1 - t2);
+                continue;
+            }
+
             // Determine if `x` got evicted by a reduced set S\S_rm
-            let diff = t2 - t1; 
+            let diff = t2 - t1;
+            self.record(diff);
             if diff > self.threshold() {
-                self.record(diff);
                 // Truly remove S_rm from S
                 s.retain(|x| !s_rm.contains(x));
                 // Suring the next step we will try to remove 10 more addrs
@@ -262,10 +290,16 @@ impl RPP {
             self.write_set(s)?;
             let (_, t2) = self.conn.read_timed(x)?;
 
+            // Both t1 and t2 are from cache
+            if t1 > t2 {
+                self.record(t1 - t2);
+                continue;
+            }
+
             // We evicted x? Then we do not need it anymore
-            let diff = t2 - t1; 
+            let diff = t2 - t1;
+            self.record(diff);
             if diff > self.threshold() {
-                self.record(diff);
                 self.addrs.remove(&x);
             }
         }
