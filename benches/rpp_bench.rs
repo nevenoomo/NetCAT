@@ -11,9 +11,7 @@ pub fn rpp_bench(c: &mut Criterion) {
         b.iter(|| {
             let conn = Box::new(LocalMemoryConnector::new());
 
-            let mut rpp = RPP::new(conn);
-
-            rpp.build_set().unwrap();
+            let rpp = RPP::new(conn);
         })
     });
 }

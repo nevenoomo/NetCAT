@@ -11,11 +11,13 @@ use std::collections::{HashMap, HashSet};
 use std::io::Result;
 use std::io::{Error, ErrorKind};
 
+pub const PAGE_SIZE: usize = 4096; // 4 KiB
+
 pub const NUM_OF_SETS: usize = 64;
 pub const BUFF_LEN: usize = 8_388_608; // 8 MiB
 pub const BYTES_PER_LINE: usize = 64;
 pub const LINES_PER_SET: usize = 12;
-pub const THRESHOLD: Time = 260;
+pub const CACHE_SIZE: usize = 6_291_456; // 6 MiB
 pub const DELTA: usize = 30;
 pub const INSERT_RATE: usize = 100;
 pub const TIMINGS_INIT_FILL: usize = 1000;
@@ -50,7 +52,7 @@ pub struct Params {
     buff_len: usize,
     bytes_per_line: usize,
     lines_per_set: usize,
-    threshold: Time,
+    cache_size: usize,
 }
 
 impl Params {
@@ -59,14 +61,14 @@ impl Params {
         buff_len: usize,
         bytes_per_line: usize,
         lines_per_set: usize,
-        threshold: Time,
+        cache_size: usize,
     ) -> Params {
         Params {
             num_of_sets,
             buff_len,
             bytes_per_line,
             lines_per_set,
-            threshold,
+            cache_size,
         }
     }
 }
@@ -90,7 +92,7 @@ impl RPP {
                 BUFF_LEN,
                 BYTES_PER_LINE,
                 LINES_PER_SET,
-                THRESHOLD,
+                CACHE_SIZE,
             ),
             conn,
             sets: Vec::with_capacity(NUM_OF_SETS),
@@ -109,7 +111,7 @@ impl RPP {
             params,
             conn,
             sets: Vec::with_capacity(params.num_of_sets),
-            addrs: (0usize..params.num_of_sets)
+            addrs: (0usize..params.buff_len)
                 .step_by(params.lines_per_set)
                 .collect(),
             timings: hist,
@@ -125,6 +127,11 @@ impl RPP {
         use rand::seq::IteratorRandom;
         // we assume that the memory region is not cached
         let mut rng = rand::thread_rng();
+    
+        // no page faults
+        for i in (0usize..self.params.buff_len).step_by(PAGE_SIZE) {
+            self.conn.read_timed(i).expect("Could not read in hist");
+        }
 
         for ofs in self
             .addrs
@@ -197,16 +204,21 @@ impl RPP {
     }
 
     fn build_sets(&mut self) {
+        let num_sets =
+            self.params.cache_size / (self.params.lines_per_set * self.params.bytes_per_line);
         self.conn.allocate(self.params.buff_len);
         self.fill_hist();
 
-        while let Err(e) = self.build_set() {
-            println!("{}", e);
+        while self.sets.len() != num_sets {
+            match self.build_set() {
+                Ok(set) => self.push_sets(set),
+                Err(e) => println!("{}", e),
+            }
         }
     }
 
     // note that this step might fail only due to read & write fails. read and write fail only as the last resort
-    pub fn build_set(&mut self) -> Result<Box<EvictionSet>> {
+    fn build_set(&mut self) -> Result<EvictionSet> {
         let (mut s, x) = self.forward_selection()?;
         self.backward_selection(&mut s, x)?;
         self.cleanup(&s)?;
@@ -214,7 +226,17 @@ impl RPP {
         Ok(s)
     }
 
-    fn forward_selection(&mut self) -> Result<(Box<EvictionSet>, Address)> {
+    fn push_sets(&mut self, set: EvictionSet) {
+        const CTL_BIT: usize = 6; // 6 - 12 (lower bits - lower val)
+        const NUM_VARIANTS: usize = 64; // bits 12 - 6 determine the cache set. We have 2^6 = 64 options to change those
+        for i in 1..NUM_VARIANTS {
+            let new_set = set.iter().copied().map(|x| x ^ (i << CTL_BIT)).collect();
+            self.sets.push(new_set);
+        }
+        self.sets.push(set);
+    }
+
+    fn forward_selection(&mut self) -> Result<(EvictionSet, Address)> {
         let mut n = self.params.lines_per_set + 1;
         // We expect to have this much elems in the resulting set
         let mut latencies = HashMap::with_capacity(self.params.buff_len / 4);
@@ -251,7 +273,7 @@ impl RPP {
             let diff = t2 - t1;
             if diff > self.threshold() {
                 self.record_n(diff, (n / INSERT_RATE) as u64);
-                return Ok((Box::new(sub_set), x));
+                return Ok((sub_set, x));
             }
 
             n += 1;
