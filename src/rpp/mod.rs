@@ -7,21 +7,22 @@ use crate::connection::{MemoryConnector, Time};
 use hdrhistogram::Histogram;
 use rand;
 use std::cmp::min;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Result;
 use std::io::{Error, ErrorKind};
 
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
+pub const ADDR_NUM: usize = 5000; // We take this number from the netcat article
 
-pub const NUM_OF_SETS: usize = 64;
-pub const BUFF_LEN: usize = 8_388_608; // 8 MiB
 pub const BYTES_PER_LINE: usize = 64;
 pub const LINES_PER_SET: usize = 12;
 pub const CACHE_SIZE: usize = 6_291_456; // 6 MiB
+
 pub const DELTA: usize = 30;
-pub const INSERT_RATE: usize = 100;
 pub const TIMINGS_INIT_FILL: usize = 1000;
-pub const PERCENTILE: f64 = 60.0;
+pub const TIMING_REFRESH_RATE: usize = 1000;
+pub const INSERT_RATE: usize = 100;
+pub const PERCENTILE: f64 = 50.0;
 
 type Address = usize;
 type Contents = u8;
@@ -43,29 +44,20 @@ macro_rules! median {
 /// # EvictionSet
 /// EvictionSet
 type EvictionSet = HashSet<Address>;
+type EvictionSets = HashMap<BTreeSet<usize>, Vec<EvictionSet>>;
 
 /// # Params
 /// Parameters for Remote PRIME+PROBE.
 #[derive(Clone, Copy)]
-pub struct Params {
-    num_of_sets: usize,
-    buff_len: usize,
+pub struct CacheParams {
     bytes_per_line: usize,
     lines_per_set: usize,
     cache_size: usize,
 }
 
-impl Params {
-    pub fn new(
-        num_of_sets: usize,
-        buff_len: usize,
-        bytes_per_line: usize,
-        lines_per_set: usize,
-        cache_size: usize,
-    ) -> Params {
-        Params {
-            num_of_sets,
-            buff_len,
+impl CacheParams {
+    pub fn new(bytes_per_line: usize, lines_per_set: usize, cache_size: usize) -> CacheParams {
+        CacheParams {
             bytes_per_line,
             lines_per_set,
             cache_size,
@@ -73,51 +65,60 @@ impl Params {
     }
 }
 
+impl Default for CacheParams {
+    fn default() -> Self {
+        Self::new(BYTES_PER_LINE, LINES_PER_SET, CACHE_SIZE)
+    }
+}
+
+#[derive(Clone, Default)]
+struct RppParams {
+    n_lines: usize,
+    n_sets: usize,
+    v_buf: usize,
+}
+
+impl From<CacheParams> for RppParams {
+    fn from(cp: CacheParams) -> Self {
+        let mut p: RppParams = Default::default();
+        p.n_lines = cp.lines_per_set;
+        p.n_sets = cp.cache_size / (cp.lines_per_set * cp.bytes_per_line);
+        p.v_buf = ADDR_NUM * PAGE_SIZE;
+
+        p
+    }
+}
+
 /// # RPP
 /// Contains the context of the RPP for a given connection.
 pub struct RPP {
-    params: Params,
+    params: RppParams,
     conn: Box<dyn MemoryConnector<Item = Contents>>,
-    sets: Vec<EvictionSet>,
+    sets: EvictionSets,
     addrs: HashSet<Address>,
     timings: Histogram<u64>, // we will be using this to dynamically scale threshold
 }
 
 impl RPP {
     pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>) -> RPP {
-        let hist = Histogram::new(5).expect("could not create hist"); // 5 sets the precision and it is the maximum possible
-        let mut rpp = RPP {
-            params: Params::new(
-                NUM_OF_SETS,
-                BUFF_LEN,
-                BYTES_PER_LINE,
-                LINES_PER_SET,
-                CACHE_SIZE,
-            ),
-            conn,
-            sets: Vec::with_capacity(NUM_OF_SETS),
-            addrs: (0usize..BUFF_LEN).step_by(BYTES_PER_LINE).collect(),
-            timings: hist,
-        };
-        rpp.build_sets();
-
-        rpp
+        let params: CacheParams = Default::default();
+        Self::with_params(conn, params)
     }
 
-    pub fn with_params(conn: Box<dyn MemoryConnector<Item = Contents>>, params: Params) -> RPP {
+    pub fn with_params(
+        conn: Box<dyn MemoryConnector<Item = Contents>>,
+        cparams: CacheParams,
+    ) -> RPP {
         let hist = Histogram::new(5).expect("could not create hist"); // 5 sets the precision and it is the maximum possible
+        let params: RppParams = cparams.into();
 
         let mut rpp = RPP {
+            sets: EvictionSets::with_capacity(params.n_sets),
             params,
             conn,
-            sets: Vec::with_capacity(params.num_of_sets),
-            addrs: (0usize..params.buff_len)
-                .step_by(params.lines_per_set)
-                .collect(),
+            addrs: (0usize..ADDR_NUM).map(|x| x * PAGE_SIZE).collect(), // here we collect page aligned (e.i. at the begining of the page) adresses
             timings: hist,
         };
-
-        rpp.fill_hist();
         rpp.build_sets();
 
         rpp
@@ -127,11 +128,6 @@ impl RPP {
         use rand::seq::IteratorRandom;
         // we assume that the memory region is not cached
         let mut rng = rand::thread_rng();
-    
-        // no page faults
-        for i in (0usize..self.params.buff_len).step_by(PAGE_SIZE) {
-            self.conn.read_timed(i).expect("Could not read in hist");
-        }
 
         for ofs in self
             .addrs
@@ -156,7 +152,17 @@ impl RPP {
         }
     }
 
-    fn threshold(&self) -> Time {
+    fn threshold(&mut self) -> Time {
+        static mut CALLED: usize = 0;
+
+        unsafe {
+            CALLED += 1;
+            if CALLED > TIMING_REFRESH_RATE {
+                self.timings.clear();
+                self.fill_hist();
+            }
+        }
+
         self.timings.value_at_percentile(PERCENTILE)
     }
 
@@ -203,18 +209,27 @@ impl RPP {
         Ok(())
     }
 
+    fn profiled(&self) -> usize {
+        self.sets.values().map(|v| v.len()).sum()
+    }
+
     fn build_sets(&mut self) {
-        let num_sets =
-            self.params.cache_size / (self.params.lines_per_set * self.params.bytes_per_line);
-        self.conn.allocate(self.params.buff_len);
+        self.conn.allocate(self.params.v_buf);
         self.fill_hist();
 
-        while self.sets.len() != num_sets {
+        while self.profiled() != self.params.n_sets {
             match self.build_set() {
-                Ok(set) => self.push_sets(set),
+                Ok(set) => self.check_set(set),
                 Err(e) => println!("{}", e),
             }
         }
+    }
+
+    fn check_set(&mut self, set: EvictionSet) {
+        if let Err(e) = self.add_sets(set) {
+            println!("{}", e);
+        }
+        println!("1");
     }
 
     // note that this step might fail only due to read & write fails. read and write fail only as the last resort
@@ -226,20 +241,57 @@ impl RPP {
         Ok(s)
     }
 
-    fn push_sets(&mut self, set: EvictionSet) {
+    fn add_sets(&mut self, set: EvictionSet) -> Result<()> {
         const CTL_BIT: usize = 6; // 6 - 12 (lower bits - lower val)
         const NUM_VARIANTS: usize = 64; // bits 12 - 6 determine the cache set. We have 2^6 = 64 options to change those
         for i in 1..NUM_VARIANTS {
-            let new_set = set.iter().copied().map(|x| x ^ (i << CTL_BIT)).collect();
-            self.sets.push(new_set);
+            let new_set = set.iter().copied().map(|x| x ^ (i << CTL_BIT)).collect(); // xor all options with addrs from the given set
+            self.add_set(new_set)?;
         }
-        self.sets.push(set);
+
+        self.add_set(set)
+    }
+
+    fn add_set(&mut self, set: EvictionSet) -> Result<()> {
+        // TODO verify uniqueness
+        let set_key = set.iter().map(|&x| x / PAGE_SIZE).collect();
+        let possible_keys: Vec<_> = self
+            .sets
+            .keys()
+            .filter(|k| !k.is_disjoint(&set_key))
+            .collect();
+
+        // DEBUG: Page coloring may be not enabled for a given OS
+        // we expect only one color to be found, as a page can have only one color
+        if possible_keys.len() > 1 {
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "ERROR: Cannot deside on set's color",
+            ));
+        }
+
+        if possible_keys.len() == 0 {
+            self.sets.insert(set_key, vec![set]);
+            return Ok(());
+        }
+
+        // UGLY: Do not need to update a key, if it is a superset
+        let possible_key = possible_keys[0].clone();
+        // take list of previous sets
+        let mut val = self.sets.remove(&possible_key).unwrap();
+        // add a new one
+        val.push(set);
+        // key is a union
+        let key = set_key.union(&possible_key).copied().collect();
+        // insert new entry
+        self.sets.insert(key, val);
+
+        Ok(())
     }
 
     fn forward_selection(&mut self) -> Result<(EvictionSet, Address)> {
-        let mut n = self.params.lines_per_set + 1;
-        // We expect to have this much elems in the resulting set
-        let mut latencies = HashMap::with_capacity(self.params.buff_len / 4);
+        let mut n = self.params.n_lines + 1;
+        let mut latencies = HashMap::new();
 
         loop {
             let mut sub_set: EvictionSet = self.addrs.iter().take(n).copied().collect();
@@ -285,12 +337,12 @@ impl RPP {
 
     // Here we assume that set `s` truly evicts address `x`
     fn backward_selection(&mut self, s: &mut EvictionSet, x: Address) -> Result<()> {
-        if s.len() < self.params.lines_per_set {
+        if s.len() < self.params.n_lines {
             return Err(Error::new(
                 ErrorKind::Other,
                 "ERROR: the initial set for backwards selection is too narrow.",
             ));
-        } else if s.len() == self.params.lines_per_set {
+        } else if s.len() == self.params.n_lines {
             return Ok(());
         }
 
@@ -300,7 +352,7 @@ impl RPP {
         let mut last_i = 0;
         loop {
             i += 1;
-            if s.len() < self.params.lines_per_set {
+            if s.len() < self.params.n_lines {
                 return Err(Error::new(
                     ErrorKind::Other,
                     "ERROR: Set shrunk too much during backwards selection",
@@ -308,7 +360,7 @@ impl RPP {
             }
 
             // if S is relatively small, then we do not use step adjusting
-            n = if s.len() <= self.params.lines_per_set + DELTA {
+            n = if s.len() <= self.params.n_lines + DELTA {
                 1
             } else {
                 min(n, s.len() / 2)
@@ -347,7 +399,7 @@ impl RPP {
             }
 
             // Stop when the size of the set equals the size of a cache set
-            if s.len() == self.params.lines_per_set {
+            if s.len() == self.params.n_lines {
                 return Ok(());
             }
         }

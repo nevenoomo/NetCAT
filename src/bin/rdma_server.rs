@@ -1,10 +1,11 @@
 use ibverbs;
 use netcat::connection::rdma::RdmaPrimitive;
+use netcat::rpp::{PAGE_SIZE, ADDR_NUM};
 use std::env;
 use std::io::Error;
 use std::net;
 
-const BUF_SIZE: usize = 8_388_608; // 8 MB
+const BUF_SIZE: usize = PAGE_SIZE * ADDR_NUM; // 8 MB
 const ADDR_KEY: &str = "RDMA_ADDR";
 
 fn get_devs() -> ibverbs::DeviceList {

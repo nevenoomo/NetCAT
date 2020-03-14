@@ -27,7 +27,7 @@ impl MemoryConnector for LocalMemoryConnector {
     type Item = u8;
 
     fn allocate(&mut self, size: usize) {
-        self.buf = vec![0u8; size];
+        self.buf = vec![1u8; size];
     }
 
     fn read(&self, ofs: usize) -> Result<Self::Item> {
@@ -51,9 +51,9 @@ impl MemoryConnector for LocalMemoryConnector {
         Ok((res, elapsed))
     }
 
-    fn write_timed(&mut self, ofs: usize, _what: &Self::Item) -> Result<Time> {
+    fn write_timed(&mut self, ofs: usize, what: &Self::Item) -> Result<Time> {
         let now = std::time::Instant::now();
-        self.write(ofs, &0)?;
+        self.write(ofs, what)?;
         let elapsed = now
             .elapsed()
             .as_nanos()
