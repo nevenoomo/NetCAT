@@ -91,7 +91,7 @@ impl From<CacheParams> for RppParams {
 
 /// # RPP
 /// Contains the context of the RPP for a given connection.
-pub struct RPP {
+pub struct Rpp {
     params: RppParams,
     conn: Box<dyn MemoryConnector<Item = Contents>>,
     sets: EvictionSets,
@@ -99,8 +99,8 @@ pub struct RPP {
     timings: Histogram<u64>, // we will be using this to dynamically scale threshold
 }
 
-impl RPP {
-    pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>) -> RPP {
+impl Rpp {
+    pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>) -> Rpp {
         let params: CacheParams = Default::default();
         Self::with_params(conn, params)
     }
@@ -108,11 +108,11 @@ impl RPP {
     pub fn with_params(
         conn: Box<dyn MemoryConnector<Item = Contents>>,
         cparams: CacheParams,
-    ) -> RPP {
+    ) -> Rpp {
         let hist = Histogram::new(5).expect("could not create hist"); // 5 sets the precision and it is the maximum possible
         let params: RppParams = cparams.into();
 
-        let mut rpp = RPP {
+        let mut rpp = Rpp {
             sets: EvictionSets::with_capacity(params.n_sets),
             params,
             conn,
@@ -438,6 +438,16 @@ impl RPP {
 
         Ok(())
     }
+
+    // -------------------------METHODS FOR ONLINE TRACKER---------------------
+
+    pub fn colors_len(&self) -> usize {
+        self.sets.len()
+    }
+
+    pub fn colors<'a>(&'a self) -> impl Iterator<Item=(&BTreeSet<usize>, &Vec<EvictionSet>)> + 'a {
+        self.sets.iter()
+    }
 }
 
 #[cfg(test)]
@@ -445,7 +455,7 @@ mod tests {
     #[test]
     fn new_rpp_test() {
         let conn = Box::new(crate::connection::local::LocalMemoryConnector::new());
-        super::RPP::new(conn);
+        super::Rpp::new(conn);
     }
 
     #[test]

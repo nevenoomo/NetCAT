@@ -1,5 +1,5 @@
 use criterion::{criterion_group, criterion_main, Criterion};
-use netcat::rpp::RPP;
+use netcat::rpp::Rpp;
 use netcat::connection::local::*;
 
 pub fn rpp_bench(c: &mut Criterion) {
@@ -11,7 +11,7 @@ pub fn rpp_bench(c: &mut Criterion) {
         b.iter(|| {
             let conn = Box::new(LocalMemoryConnector::new());
 
-            let _rpp = RPP::new(conn);
+            let _rpp = Rpp::new(conn);
         })
     });
 }
