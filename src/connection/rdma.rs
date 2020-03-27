@@ -220,7 +220,7 @@ impl RdmaServerConnector {
         let mr = Self::register_mr(&pd)?;
         let lkey = mr.read().unwrap().rkey();
         let laddr = ibverbs::RemoteAddr((&(mr.read().unwrap())[0] as *const RdmaPrimitive) as u64);
-        let iqp = Self::setup_qp(addr, &pd, &cq, lkey, laddr)?; //DEBUG: panics here
+        let iqp = Self::setup_qp(addr, &pd, &cq, lkey, laddr)?;
 
         Ok(RdmaServerConnector {
             ctx,
