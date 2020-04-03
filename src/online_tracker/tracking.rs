@@ -1,7 +1,5 @@
-use crate::rpp::SetCode;
 use serde::{Deserialize, Serialize};
-
-pub const WINDOW_SIZE: usize = 10;
+use super::{PatternIdx};
 
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord, Serialize, Deserialize)]
 pub enum SyncStatus {
@@ -18,7 +16,7 @@ impl Default for SyncStatus {
 
 #[derive(Default, Debug, Serialize, Deserialize, PartialEq, PartialOrd, Eq, Ord)]
 pub(crate) struct TrackingContext {
-    pos: SetCode,
+    pos: PatternIdx,
     sync_status: SyncStatus,
     should_send: bool,
     is_injected: bool,
@@ -27,13 +25,13 @@ pub(crate) struct TrackingContext {
 
 impl TrackingContext {
     #[inline(always)]
-    pub(crate) fn new(init_pos: SetCode) -> TrackingContext {
+    pub(crate) fn new(init_pos: PatternIdx) -> TrackingContext {
         let mut ctx: TrackingContext = Default::default();
         ctx.pos = init_pos;
         ctx
     }
     #[inline(always)]
-    pub(crate) fn pos(&self) -> SetCode {
+    pub(crate) fn pos(&self) -> PatternIdx {
         self.pos.clone()
     }
     #[inline(always)]
@@ -55,7 +53,7 @@ impl TrackingContext {
     }
     #[inline(always)]
     /// Updates the context corresponding to the successful syncronization
-    pub(crate) fn sync_hit(&mut self, next_pos: SetCode) -> &mut Self {
+    pub(crate) fn sync_hit(&mut self, next_pos: PatternIdx) -> &mut Self {
         self.pos = next_pos;
         self.unsynced = 0;
         self.should_send = false;
@@ -65,7 +63,7 @@ impl TrackingContext {
 
     #[inline(always)]
     /// Updates the context corresponding to the missed syncronization
-    pub(crate) fn sync_miss(&mut self, recovered_pos: SetCode) -> &mut Self {
+    pub(crate) fn sync_miss(&mut self, recovered_pos: PatternIdx) -> &mut Self {
         self.pos = recovered_pos;
         self.should_send = true;
         self.sync_status = SyncStatus::Fail;

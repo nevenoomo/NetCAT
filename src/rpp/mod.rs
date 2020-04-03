@@ -11,11 +11,11 @@ use hdrhistogram::Histogram;
 pub use params::*;
 use rand;
 use rpp_connector::RppConnector;
+use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::Result;
 use std::io::{Error, ErrorKind};
-use serde::{Serialize, Deserialize};
 
 pub const DELTA: usize = 30;
 pub const TIMINGS_INIT_FILL: usize = 1000;
@@ -106,7 +106,6 @@ impl Rpp {
 
     /// Probes the given set of addresses. Returns true if a set activation detected
     pub fn probe(&mut self, set_code: &SetCode) -> Result<Option<SetCode>> {
-        // TODO Two activations should be measured.
         let set: Vec<usize> = self.colored_sets[set_code.0][set_code.1]
             .iter()
             .copied()
@@ -119,12 +118,24 @@ impl Rpp {
         let max = lats.iter().max().unwrap();
         let min = lats.iter().min().unwrap();
 
-        // NOTE This might be a unstable
+        // NOTE This might be unstable 
         if max - min > self.threshold() {
             return Ok(None);
         }
 
         Ok(Some(*set_code))
+    }
+
+    pub fn prime_all(&mut self, set_codes: &Vec<SetCode>) -> Result<()> {
+        set_codes.iter().map(|x| self.prime(x)).collect()
+    }
+
+    pub fn probe_all(&mut self, set_codes: &Vec<SetCode>) -> Result<Vec<Option<SetCode>>> {
+        set_codes.iter().map(|x| self.probe(x)).collect()
+    }
+
+    pub fn is_activated(probes: &Vec<Option<SetCode>>) -> bool {
+        probes.iter().any(Option::is_some)
     }
 
     fn fill_hist(&mut self) {

