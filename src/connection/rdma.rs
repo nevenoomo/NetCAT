@@ -14,6 +14,7 @@ use std::time::Instant;
 const LOCAL_BUF_SIZE: usize = 4096;
 const WR_ID: u64 = 12_949_723_411_804_112_106; // some random value
 pub type RdmaPrimitive = u8;
+static mut FORK_INITED: bool = false;
 
 struct InitializedQp {
     qp: Arc<ibverbs::QueuePair>,
@@ -182,24 +183,16 @@ impl RdmaServerConnector {
         };
 
         // Sending info for RDMA handshake over TcpStream;
-        // UGLY: This could be done with one line as
-        // bincode can serialize into a writer (which a stream is), but it would take ownership
-        // of stream. `try_clone()` may be used.
-        let mut sent = 0;
-        loop {
-            match stream.write(&ser_msg[sent..]) {
-                Ok(n) => {
-                    sent += n;
-                    if sent == ser_msg.len() {
-                        break;
-                    }
-                }
-                Err(e) => panic!("ERROR: failed to transmit serealized message: {}", e),
-            }
+        // NOTE using writers in such a way may cause issues. May use .try_clone() instead
+        if let Err(e) = bincode::serialize_into(&mut stream, &ser_msg) {
+            return Err(Error::new(
+                ErrorKind::Other,
+                format!("ERROR: failed to transmit serealized message: {}", e),
+            ));
         }
 
-        // This looks so much better.
-        let rmsg: ibverbs::EndpointMsg = match bincode::deserialize_from(stream) {
+        // Recieving and desirializing info from the server
+        let rmsg: ibverbs::EndpointMsg = match bincode::deserialize_from(&mut stream) {
             Ok(data) => data,
             Err(e) => {
                 return Err(Error::new(
@@ -213,7 +206,10 @@ impl RdmaServerConnector {
     }
 
     fn setup_ib<A: net::ToSocketAddrs>(addr: A) -> Result<RdmaServerConnector> {
-        Self::fork_init()?;
+        if !unsafe { FORK_INITED } {
+            Self::fork_init()?;
+            unsafe { FORK_INITED = true };
+        }
         let ctx = Self::aquire_ctx()?;
         let pd = Self::aquire_pd(ctx.clone())?;
         let cq = Self::aquire_cq(ctx.clone())?;
@@ -253,7 +249,6 @@ impl RdmaServerConnector {
     fn fork_init() -> Result<()> {
         let res;
         // in case we use fork latter
-        // TODO maybe a flag should be placed for not using this function multiple times?
         unsafe {
             res = ibverbs::ffi::ibv_fork_init();
         }
@@ -336,7 +331,7 @@ impl RdmaServerConnector {
             }
             match completed.iter().find(|wc| wc.wr_id() == WR_ID) {
                 Some(_) => return Ok(()),
-                None => continue, //TODO: maybe pass error here
+                None => continue,
             }
         }
     }

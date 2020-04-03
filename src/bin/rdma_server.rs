@@ -17,7 +17,6 @@ fn get_devs() -> ibverbs::DeviceList {
 fn fork_init() {
     let res;
     // in case we use fork latter
-    // TODO maybe a flag should be placed for not using this function multiple times?
     unsafe {
         res = ibverbs::ffi::ibv_fork_init();
     }

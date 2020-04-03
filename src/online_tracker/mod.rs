@@ -10,19 +10,24 @@ use crate::rpp::{ColorCode, ColoredSetCode, Rpp, SetCode};
 use pattern::{Pattern, PatternIdx};
 use std::collections::HashMap;
 use std::io::Result;
+use std::io::Write;
 use std::io::{Error, ErrorKind};
 use std::net::{ToSocketAddrs, UdpSocket};
+use std::time::Instant;
 use tracking::{SyncStatus, TrackingContext};
+use serde_json::to_string;
+
+type SavedLats = Vec<(Vec<Option<SetCode>>, SyncStatus, u128)>;
 
 const REPEATINGS: usize = 8;
 const MEASUREMENT_CNT: usize = 10000;
-const PROBABILITY: f64 = 0.8;
 const MAX_FAIL_CNT: usize = 100;
 
 pub struct OnlineTracker {
     rpp: Rpp,
     sock: UdpSocket,
     pattern: Pattern,
+    latencies: SavedLats,
 }
 
 impl OnlineTracker {
@@ -40,6 +45,7 @@ impl OnlineTracker {
             rpp,
             sock,
             pattern: Default::default(),
+            latencies: SavedLats::with_capacity(MEASUREMENT_CNT),
         })
     }
 
@@ -193,9 +199,9 @@ impl OnlineTracker {
     fn measure(&mut self) -> Result<()> {
         let init_pos = self.get_init_pos()?;
         let mut ctx = TrackingContext::new(init_pos);
-        let mut probe_res = Default::default();
-
+        let timer = Instant::now();
         for _ in 0..MEASUREMENT_CNT {
+            let mut probe_res;
             let es = self.pattern.window(ctx.pos()).copied().collect();
             self.rpp.prime_all(&es)?;
 
@@ -204,6 +210,7 @@ impl OnlineTracker {
                     self.send_packet()?;
                     ctx.inject();
                 }
+                // MAYBE make a newtype for probe_results
                 probe_res = self.rpp.probe_all(&es)?;
                 if Rpp::is_activated(&probe_res) || ctx.is_injected() {
                     break;
@@ -218,9 +225,22 @@ impl OnlineTracker {
                 ctx.unsynced_meaurement();
             }
 
-            // self.save(&probe_res, &ctx);
+            self.save(probe_res, ctx.sync_status(), timer.elapsed().as_nanos());
         }
+
         Ok(())
+    }
+
+    #[inline(always)]
+    // TODO maybe we do not need to store all the information
+    fn save(&mut self, probes: Vec<Option<SetCode>>, stat: SyncStatus, timestamp: u128) {
+        self.latencies.push((probes, stat, timestamp))
+    }
+
+    /// Dumps all gathered info. Should be used only after the gathering routine. Otherwise will result in
+    /// an empty container
+    pub fn dump_raw(self) -> SavedLats {
+        self.latencies
     }
 }
 
@@ -273,5 +293,5 @@ mod tests {
 
         let pattern = OnlineTracker::find_pattern(hm).expect("No pattern found");
         assert_eq!(expected, pattern, "The pattern is incorrect");
-    }    
+    }
 }
