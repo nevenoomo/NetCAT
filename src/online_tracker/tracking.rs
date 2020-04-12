@@ -4,8 +4,8 @@ use super::{PatternIdx};
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd, Eq, Ord, Serialize, Deserialize)]
 pub enum SyncStatus {
     NoSync,
-    Ok,
-    Fail,
+    Hit,
+    Miss,
 }
 
 impl Default for SyncStatus {
@@ -57,7 +57,7 @@ impl TrackingContext {
         self.pos = next_pos;
         self.unsynced = 0;
         self.should_send = false;
-        self.sync_status = SyncStatus::Ok;
+        self.sync_status = SyncStatus::Hit;
         self
     }
 
@@ -66,7 +66,7 @@ impl TrackingContext {
     pub(crate) fn sync_miss(&mut self, recovered_pos: PatternIdx) -> &mut Self {
         self.pos = recovered_pos;
         self.should_send = true;
-        self.sync_status = SyncStatus::Fail;
+        self.sync_status = SyncStatus::Miss;
         self
     }
 

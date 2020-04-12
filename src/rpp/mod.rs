@@ -34,7 +34,6 @@ macro_rules! median {
         for _ in 0..STABILIZE_CNT {
             vec.push($blk);
         }
-        println!("{:?}", vec);
         vec.sort();
         vec[(vec.len() - 1) / 2]
     }};
@@ -59,6 +58,30 @@ type EvictionSets = Vec<EvictionSet>;
 type ColoredSets = Vec<EvictionSets>;
 // a mapping from the color code to the page numbers (aka addr/4096) of this color
 type ColorKeys = Vec<SetsKey>;
+
+/// Probe results with wraped data
+// NOTE maybe downgrade to Option??
+#[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord, Serialize, Deserialize)]
+pub enum ProbeResult<T> {
+    Activated(T),
+    Stale(T),
+}
+
+impl<T> ProbeResult<T> {
+    pub fn is_activated(&self) -> bool {
+        if let ProbeResult::Activated(_) = self {
+            return true;
+        }
+
+        false
+    }
+
+    pub fn is_stale(&self) -> bool {
+        !self.is_activated()
+    }
+}
+
+pub type Latencies = Vec<Time>;
 
 /// # RPP
 /// Contains the context of the RPP for a given connection.
@@ -105,7 +128,11 @@ impl Rpp {
     }
 
     /// Probes the given set of addresses. Returns true if a set activation detected
-    pub fn probe(&mut self, set_code: &SetCode) -> Result<Option<SetCode>> {
+    /// Returns `Activated(lats)`, where `lats` is a vector of latencies for addresses in
+    /// the given set, if the cache activation has been measured, or `Stale(lats)` otherwise
+    pub fn probe(&mut self, set_code: &SetCode) -> Result<ProbeResult<Latencies>> {
+        use ProbeResult::*;
+
         let set: Vec<usize> = self.colored_sets[set_code.0][set_code.1]
             .iter()
             .copied()
@@ -118,24 +145,24 @@ impl Rpp {
         let max = lats.iter().max().unwrap();
         let min = lats.iter().min().unwrap();
 
-        // NOTE This might be unstable 
+        // NOTE This might be unstable
         if max - min > self.threshold() {
-            return Ok(None);
+            return Ok(Activated(lats));
         }
 
-        Ok(Some(*set_code))
+        Ok(Stale(lats))
     }
 
     pub fn prime_all(&mut self, set_codes: &Vec<SetCode>) -> Result<()> {
         set_codes.iter().map(|x| self.prime(x)).collect()
     }
 
-    pub fn probe_all(&mut self, set_codes: &Vec<SetCode>) -> Result<Vec<Option<SetCode>>> {
+    pub fn probe_all(&mut self, set_codes: &Vec<SetCode>) -> Result<Vec<ProbeResult<Latencies>>> {
         set_codes.iter().map(|x| self.probe(x)).collect()
     }
 
-    pub fn is_activated(probes: &Vec<Option<SetCode>>) -> bool {
-        probes.iter().any(Option::is_some)
+    pub fn is_activated<T>(probes: &Vec<ProbeResult<T>>) -> bool {
+        probes.iter().any(ProbeResult::is_activated)
     }
 
     fn fill_hist(&mut self) {
@@ -166,6 +193,12 @@ impl Rpp {
         }
     }
 
+    #[inline(always)]
+    fn reset_timings(&mut self) {
+        self.timings.clear();
+        self.fill_hist();
+    }
+
     fn threshold(&mut self) -> Time {
         static mut CALLED: usize = 0;
 
@@ -173,8 +206,7 @@ impl Rpp {
             // unsafe, because mutating static variable
             CALLED += 1;
             if CALLED > TIMING_REFRESH_RATE {
-                self.timings.clear();
-                self.fill_hist();
+                self.reset_timings();
             }
         }
 
@@ -208,7 +240,10 @@ impl Rpp {
         while self.profiled() != self.params.n_sets {
             match self.build_set() {
                 Ok(set) => self.check_set(set),
-                Err(e) => println!("{}", e),
+                Err(e) => {
+                    println!("{}", e);
+                    self.reset_timings();
+                }
             }
         }
     }
@@ -217,7 +252,6 @@ impl Rpp {
         if let Err(e) = self.add_sets(set) {
             println!("{}", e);
         }
-        println!("1");
     }
 
     // note that this step might fail only due to read & write fails. read and write fail only as the last resort

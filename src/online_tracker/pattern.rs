@@ -1,4 +1,5 @@
 use super::SetCode;
+use crate::rpp::ProbeResult;
 use custom_derive::custom_derive;
 use newtype_derive::*;
 use std::io::{Error, ErrorKind, Result};
@@ -46,7 +47,7 @@ impl Pattern {
     pub fn recover_next<A>(
         &self,
         pos: PatternIdx,
-        probe_res: &Vec<Option<A>>,
+        probe_res: &Vec<ProbeResult<A>>,
     ) -> Result<PatternIdx> {
         // First we try to find an activation *right after* the current position.
         // Here we assume that just an other packet interfered with our
@@ -54,18 +55,28 @@ impl Pattern {
         if let Some(idx) = &probe_res[WINDOW_SIZE / 2..]
             .iter()
             .enumerate()
-            .find_map(|(idx, x)| if x.is_none() { None } else { Some(idx) })
+            .find_map(|(idx, x)| if x.is_stale() { None } else { Some(idx) })
         {
-            return Ok((pos + idx) % self.0.len());
+            // We have found the index at which the activation *in the window*
+            // was registered. We need to:
+            //
+            // 1. Make it the index of the set in the *whole pattern* by adding **pos**
+            // 2. Make it the **next expected** position by +1
+            return Ok((pos + idx + 1) % self.0.len());
         }
         // Here we have found no activation after the current position.
         // We should try loking for *before*.
         if let Some(idx) = &probe_res[..WINDOW_SIZE / 2]
             .iter()
             .enumerate()
-            .find_map(|(idx, x)| if x.is_none() { None } else { Some(idx) })
+            .find_map(|(idx, x)| if x.is_stale() { None } else { Some(idx) })
         {
-            return Ok((pos as i64 - ((WINDOW_SIZE / 2) as i64 - *idx as i64))
+            // Here we:
+            //
+            // 1. Make the pos the index of the pattern by subtrackting idx
+            // (remember, that we registered activation **behind** the *pos*)
+            // 2. Make it the **next expected** by + 1
+            return Ok((pos as i64 - ((WINDOW_SIZE / 2) as i64 - *idx as i64) + 1)
                 .rem_euclid(self.0.len() as i64) as usize);
         }
 
@@ -110,34 +121,34 @@ mod tests {
         //                           ^ current_pos
 
         let recoverable_after = vec![
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,                // <- current_pos
-            Some(SetCode(1, 2)), // <- corresponds to 3
-            None,
-            None,
-            None,
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),     // <- current_pos
+            ProbeResult::Activated(()), // <- corresponds to 3
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
         ];
         let recoverable_after_expected = 3usize;
 
         let recoverable_before = vec![
-            None,
-            Some(SetCode(1, 2)), // <- corresponds to 8
-            None,
-            None,
-            None,
-            None, // <- current_pos
-            None,
-            None,
-            None,
-            None,
+            ProbeResult::Stale(()),
+            ProbeResult::Activated(()), // <- corresponds to 8
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()), // <- current_pos
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
+            ProbeResult::Stale(()),
         ];
         let recoverable_before_expected = 8usize;
 
-        let unrecoverable: Vec<Option<SetCode>> = vec![None; 10];
+        let unrecoverable = vec![ProbeResult::Stale(()); 10];
 
         assert_eq!(
             pattern
