@@ -5,8 +5,9 @@
 mod pattern;
 mod tracking;
 
-use crate::connection::{MemoryConnector, Time};
-use crate::rpp::{
+use crate::connection::MemoryConnector;
+pub use crate::connection::Time;
+pub use crate::rpp::{
     ColorCode, ColoredSetCode, Contents, Latencies, ProbeResult, ProbeResult::*, Rpp, SetCode,
 };
 use pattern::{Pattern, PatternIdx};
@@ -15,9 +16,10 @@ use std::io::Result;
 use std::io::{Error, ErrorKind};
 use std::net::{ToSocketAddrs, UdpSocket};
 use std::time::Instant;
-use tracking::{SyncStatus, TrackingContext};
+pub use tracking::SyncStatus;
+use tracking::TrackingContext;
 
-type SavedLats = Vec<(Vec<ProbeResult<Latencies>>, SyncStatus, Time)>;
+pub type SavedLats = Vec<(Vec<ProbeResult<Latencies>>, SyncStatus, Time)>;
 type PossiblePatterns = HashMap<ColorCode, Vec<Option<ColoredSetCode>>>;
 
 const REPEATINGS: usize = 8;
