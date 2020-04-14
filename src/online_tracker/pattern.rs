@@ -9,10 +9,11 @@ pub const WINDOW_SIZE: usize = 10;
 
 pub type PatternIdx = usize;
 
+
 custom_derive! {
     #[derive(Debug, Default, Clone, PartialEq, Eq, NewtypeFrom,
         NewtypeDeref, NewtypeDerefMut,
-        NewtypeIndex(usize), NewtypeIndexMut(usize) )]
+        NewtypeIndex(usize), NewtypeIndexMut(usize))]
     pub struct Pattern(Vec<SetCode>);
 }
 

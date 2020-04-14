@@ -7,7 +7,9 @@ mod params;
 mod rpp_connector;
 
 use crate::connection::{MemoryConnector, Time};
+use console::style;
 use hdrhistogram::Histogram;
+use indicatif;
 pub use params::*;
 use rand;
 use rpp_connector::RppConnector;
@@ -92,16 +94,22 @@ pub struct Rpp {
     color_keys: ColorKeys,
     addrs: HashSet<Address>,
     timings: Histogram<u64>, // we will be using this to dynamically scale threshold
+    quite: bool,
 }
 
 impl Rpp {
-    pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>) -> Rpp {
+    /// Creates a new instance with the default params.
+    /// `quite` tells, whether the progress should be reported on the screen
+    pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>, quite: bool) -> Rpp {
         let params: CacheParams = Default::default();
-        Self::with_params(conn, params)
+        Self::with_params(conn, quite, params)
     }
 
+    /// Creates a new instance with the provided params and starts building eviction sets
+    /// `quite` tells, whether the progress should be reported on the screen
     pub fn with_params(
         conn: Box<dyn MemoryConnector<Item = Contents>>,
+        quite: bool,
         cparams: CacheParams,
     ) -> Rpp {
         let hist = Histogram::new(5).expect("could not create hist"); // 5 sets the precision and it is the maximum possible
@@ -115,6 +123,7 @@ impl Rpp {
             // TODO: do we really need ADDR_NUM here? We need at least as much page as there are colors. Maybe manipulate `params.n_colors`?
             addrs: (0usize..ADDR_NUM).map(|x| x * PAGE_SIZE).collect(), // here we collect page aligned (e.i. at the begining of the page) adresses
             timings: hist,
+            quite,
         };
         rpp.build_sets();
 
@@ -153,14 +162,17 @@ impl Rpp {
         Ok(Stale(lats))
     }
 
+    /// Primes all sets in a vector
     pub fn prime_all(&mut self, set_codes: &Vec<SetCode>) -> Result<()> {
         set_codes.iter().map(|x| self.prime(x)).collect()
     }
 
+    /// Probes all sets in a vector
     pub fn probe_all(&mut self, set_codes: &Vec<SetCode>) -> Result<Vec<ProbeResult<Latencies>>> {
         set_codes.iter().map(|x| self.probe(x)).collect()
     }
 
+    /// Test whether an activation has been observed in the provided Probe Results
     pub fn is_activated<T>(probes: &Vec<ProbeResult<T>>) -> bool {
         probes.iter().any(ProbeResult::is_activated)
     }
@@ -234,17 +246,41 @@ impl Rpp {
     }
 
     fn build_sets(&mut self) {
+        if !self.quite {
+            println!(
+                "Building sets: {}",
+                style("STARTED").green()
+            )
+        }
         self.conn.allocate(self.params.v_buf);
         self.fill_hist();
 
+        let pb = indicatif::ProgressBar::new(self.params.n_sets as u64);
+
+        if !self.quite {
+            pb.set_style(indicatif::ProgressStyle::default_bar().template("{prefix:.bold} [{elapsed}] [{bar:40.cyan/blue}] {percent}% ({eta})")
+            .progress_chars("#>-"));
+            pb.set_prefix("Building sets:");
+        }
         while self.profiled() != self.params.n_sets {
             match self.build_set() {
                 Ok(set) => self.check_set(set),
                 Err(e) => {
-                    println!("{}", e);
+                    println!("{}", style(e).red());
                     self.reset_timings();
                 }
             }
+            if !self.quite {
+                pb.set_position(self.profiled() as u64);
+            }
+        }
+
+        if !self.quite {
+            pb.finish_and_clear();
+            println!(
+                "Building sets: {}",
+                style("FINISHED").green()
+            );
         }
     }
 
@@ -509,25 +545,29 @@ impl Rpp {
 
     // -------------------------METHODS FOR ONLINE TRACKER---------------------
 
+    /// Returns the number of profiled colors
     pub fn colors_len(&self) -> usize {
         self.colored_sets.len()
     }
 
+    /// Returns an iterator over all profiled `ColorCode`s
     pub fn colors<'a>(&'a self) -> impl Iterator<Item = ColorCode> + 'a {
         self.colored_sets.iter().enumerate().map(|(i, _)| i)
     }
 
+    /// Returns the number of eviction sets, profiled for the given color
     pub fn color_len(&self, color_code: ColorCode) -> usize {
         self.colored_sets[color_code].len()
     }
 
+    /// Return an iterator over `SetCodes` for the given color
     pub fn iter_color<'a>(
         &'a self,
         color_code: ColorCode,
     ) -> impl Iterator<Item = ColoredSetCode> + 'a {
         0..self.colored_sets[color_code].len()
     }
-
+    /// Returns an iterator over all proviled `SetCode`s
     pub fn iter<'a>(&'a self) -> impl Iterator<Item = SetCode> + 'a {
         self.colored_sets
             .iter()
@@ -545,7 +585,7 @@ mod tests {
     #[test]
     fn new_rpp_test() {
         let conn = Box::new(crate::connection::local::LocalMemoryConnector::new());
-        super::Rpp::new(conn);
+        super::Rpp::new(conn, false);
     }
 
     #[test]

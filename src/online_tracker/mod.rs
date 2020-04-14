@@ -31,18 +31,29 @@ pub struct OnlineTracker {
     sock: UdpSocket,
     pattern: Pattern,
     latencies: SavedLats,
+    quite: bool,
 }
 
 impl OnlineTracker {
-    /// Creates a new online tracker. `addr` is the victim-server address.
+    /// Creates a new online tracker. 
+    /// 
+    /// # Arguements
+    /// 
+    /// - `addr` - Socket Address of the victim server (used for control packets, like synchronization of ring buffer possition)
+    /// - `conn` - A memory connector, which will be used for communication with the server  
+    /// - `quite` - Whether Online Tracker should report the progress
+    /// 
+    /// # Fails
+    /// 
     /// Fails if port 9009 is used on the attacker machine or if the given
     /// address is unapropriet for connecting to.  
     pub fn new<A: ToSocketAddrs + Clone>(
         addr: A,
         conn: Box<dyn MemoryConnector<Item = Contents>>,
+        quite: bool
     ) -> Result<OnlineTracker> {
-        let rpp = Rpp::new(conn);
-        let sock = UdpSocket::bind("127.0.0.1:9009")?;
+        let rpp = Rpp::new(conn, quite);
+        let sock = UdpSocket::bind("0.0.0.0:9009")?;
         sock.connect(addr)?;
         sock.set_nonblocking(true)?;
 
@@ -51,7 +62,13 @@ impl OnlineTracker {
             sock,
             pattern: Default::default(),
             latencies: SavedLats::with_capacity(MEASUREMENT_CNT),
+            quite,
         })
+    }
+
+    /// Sets the verbosity of the Online Tracker instance 
+    pub fn set_quite(&mut self, quite: bool) {
+        self.quite = quite;
     }
 
     /// Starts online tracking phase.
@@ -67,12 +84,23 @@ impl OnlineTracker {
     ///
     // UGLY maybe there is some other way to handle retries?
     pub fn track(&mut self) -> Result<()> {
+        use console::style;
+        
         let mut err_cnt = 0;
+        let quite = self.quite;
+
+        if !quite {
+            println!("Online Tracker: {}", style("STARTED").green());
+        }
         while let Err(e) = self.locate_rx() {
             err_cnt += 1;
             if err_cnt > MAX_FAIL_CNT {
                 return Err(e);
             }
+        }
+        if !quite {
+            println!("Online Tracker: {}", style("Located ring buffer").green());
+            println!("Online Tracker: {}", style("Starting measurements").green());
         }
 
         err_cnt = 0;
@@ -82,6 +110,10 @@ impl OnlineTracker {
             if err_cnt > MAX_FAIL_CNT {
                 return Err(e);
             }
+        }
+
+        if !quite {
+            println!("Online Tracker: {}", style("MEASUREMENTS COMPLETED").green());
         }
 
         Ok(())

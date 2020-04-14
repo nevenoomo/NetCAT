@@ -76,7 +76,7 @@ fn main() {
     msg.rkey = mr.rkey();
     msg.raddr = ibverbs::RemoteAddr(laddr);
 
-    let addr = env::var(ADDR_KEY.to_string()).unwrap_or("127.0.0.1:9003".to_string());
+    let addr = env::var(ADDR_KEY.to_string()).unwrap_or("0.0.0.0".to_string()) + ":9003";
 
     let listner = net::TcpListener::bind(addr).expect("Listener failed");
     let (stream, _addr) = listner.accept().expect("Accepting failed");

