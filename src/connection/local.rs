@@ -1,4 +1,4 @@
-use crate::connection::{MemoryConnector, Time};
+use crate::connection::{MemoryConnector, CacheConnector, Time, Address};
 use std::convert::TryInto;
 use std::io::Result;
 
@@ -26,20 +26,24 @@ pub fn flush<T>(buf: &[T]) {
 impl MemoryConnector for LocalMemoryConnector {
     type Item = u8;
 
+    #[inline(always)]
     fn allocate(&mut self, size: usize) {
         self.buf = vec![1u8; size];
     }
 
+    #[inline(always)]
     fn read(&self, ofs: usize) -> Result<Self::Item> {
         Ok(self.buf[ofs])
     }
 
+    #[inline(always)]
     fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()> {
         self.buf[ofs] = *what;
 
         Ok(())
     }
 
+    #[inline(always)]
     fn read_timed(&self, ofs: usize) -> Result<(Self::Item, Time)> {
         let now = std::time::Instant::now();
         let res = self.read(ofs)?;
@@ -51,6 +55,7 @@ impl MemoryConnector for LocalMemoryConnector {
         Ok((res, elapsed))
     }
 
+    #[inline(always)]
     fn write_timed(&mut self, ofs: usize, what: &Self::Item) -> Result<Time> {
         let now = std::time::Instant::now();
         self.write(ofs, what)?;
@@ -63,12 +68,14 @@ impl MemoryConnector for LocalMemoryConnector {
         Ok(elapsed)
     }
 
+    #[inline(always)]
     fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize> {
         buf.copy_from_slice(&self.buf[ofs..ofs + buf.len()]);
 
         Ok(buf.len())
     }
 
+    #[inline(always)]
     fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize, Time)> {
         let now = std::time::Instant::now();
         let n = self.read_buf(ofs, buf)?;
@@ -81,12 +88,14 @@ impl MemoryConnector for LocalMemoryConnector {
         Ok((n, elapsed))
     }
 
+    #[inline(always)]
     fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize> {
         (&mut self.buf[ofs..ofs + buf.len()]).copy_from_slice(buf);
 
         Ok(buf.len())
     }
 
+    #[inline(always)]
     fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)> {
         let now = std::time::Instant::now();
         let n = self.write_buf(ofs, buf)?;
@@ -97,5 +106,33 @@ impl MemoryConnector for LocalMemoryConnector {
             .unwrap_or(Time::max_value());
 
         Ok((n, elapsed))
+    }
+}
+
+impl CacheConnector for LocalMemoryConnector {
+    type Item = u8;
+
+    #[inline(always)]
+    fn cache(&mut self, addr: usize) -> Result<()> {
+        self.read(addr)?;
+        Ok(())
+    } 
+
+    #[inline(always)]
+    fn time_access(&mut self, addr: Address) -> Result<Time> {
+        let now = std::time::Instant::now();
+        self.read(addr)?;
+        let elapsed = now
+            .elapsed()
+            .as_nanos()
+            .try_into()
+            .unwrap_or(Time::max_value());
+        
+        Ok(elapsed)
+    }
+
+    #[inline(always)]
+    fn reserve(&mut self, size: usize) {
+        self.allocate(size)
     }
 }

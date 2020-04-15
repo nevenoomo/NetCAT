@@ -1,13 +1,15 @@
-use super::SetCode;
-use crate::rpp::ProbeResult;
+use super::{SetCode, REPEATINGS};
+use crate::rpp::{ProbeResult, ColorCode, ColoredSetCode};
 use custom_derive::custom_derive;
 use newtype_derive::*;
 use std::io::{Error, ErrorKind, Result};
 use std::iter::FromIterator;
+use std::collections::HashMap;
 
 pub const WINDOW_SIZE: usize = 10;
 
 pub type PatternIdx = usize;
+pub type PossiblePatterns = HashMap<ColorCode, Vec<Option<ColoredSetCode>>>;
 
 
 custom_derive! {
@@ -25,9 +27,78 @@ impl FromIterator<SetCode> for Pattern {
 
 impl Pattern {
     #[inline(always)]
-    pub fn new() -> Self {
-        Pattern(Vec::new())
+    pub fn find(patterns: PossiblePatterns) -> Result<Self> {
+        let mut fnd_pts = HashMap::with_capacity(1);
+
+        for (color_code, pattern) in patterns {
+            let record = Self::pattern_to_rec(pattern);
+
+            let pat = match Self::pat_from_rec(record) {
+                Some(pat) => pat,
+                None => continue,
+            };
+
+            fnd_pts.insert(color_code, pat);
+        }
+
+        // For now, we expect only one pattern to arise. If not, then other methods should be used
+        // NOTE one may add confidence level for each pattern, based on the statistics for each entry in
+        // a pattern
+        // UGLY should have a separete error type
+        if fnd_pts.len() != 1 {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "ERROR: Cannot decide on pattern",
+            ));
+        }
+
+        let (color_code, pat) = fnd_pts.into_iter().next().unwrap();
+        let set_code_pat = pat
+            .into_iter()
+            .map(|colored_set_code| SetCode(color_code, colored_set_code))
+            .collect();
+
+        Ok(set_code_pat)
     }
+
+    /// Given a repeated pattern, count which elements repeat on each position
+    fn pattern_to_rec(pattern: Vec<Option<ColoredSetCode>>) -> Vec<HashMap<ColoredSetCode, usize>> {
+        let chunk_len = pattern.len() / REPEATINGS;
+        let mut record = vec![HashMap::new(); chunk_len];
+
+        for (i, v) in pattern.iter().enumerate() {
+            if let Some(colored_set_code) = v {
+                let cnt = record[i % chunk_len].entry(*colored_set_code).or_insert(0);
+                *cnt += 1;
+            }
+        }
+
+        record
+    }
+
+    fn pat_from_rec(rec: Vec<HashMap<ColoredSetCode, usize>>) -> Option<Vec<ColoredSetCode>> {
+        rec.into_iter().map(Self::get_max_repeating).collect()
+    }
+
+    /// Return None if cannot determine most repeating element.
+    fn get_max_repeating(hm: HashMap<ColoredSetCode, usize>) -> Option<ColoredSetCode> {
+        if hm.is_empty() {
+            return None;
+        }
+
+        let (colored_set_code, cnt) = hm.iter().max_by_key(|(_, &cnt)| cnt)?;
+
+        // Check uniqueness of the maximum. If not, then we cannot determine that it is a real max
+        if hm
+            .iter()
+            .any(|(cc, cnt1)| cnt == cnt1 && cc != colored_set_code)
+        {
+            return None;
+        }
+
+        Some(*colored_set_code)
+    }
+
     pub fn window<'a>(&'a self, pos: PatternIdx) -> impl Iterator<Item = &SetCode> + 'a {
         let pat_len = self.0.len() as i64;
         let left = (pos as i64 - WINDOW_SIZE as i64 / 2).rem_euclid(pat_len) as usize;

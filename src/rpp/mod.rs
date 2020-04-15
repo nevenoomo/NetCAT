@@ -4,28 +4,25 @@
 #![allow(dead_code)]
 
 mod params;
-mod rpp_connector;
+mod timing_classif;
 
-use crate::connection::{MemoryConnector, Time};
+use crate::connection::{Address, CacheConnector, Time};
 use console::style;
-use hdrhistogram::Histogram;
 use indicatif;
 pub use params::*;
 use rand;
-use rpp_connector::RppConnector;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::io::Result;
 use std::io::{Error, ErrorKind};
+use timing_classif::{CacheTiming, TimingClassifier};
 
 pub const DELTA: usize = 30;
 pub const TIMINGS_INIT_FILL: usize = 1000;
 pub const TIMING_REFRESH_RATE: usize = 1000;
 pub const INSERT_RATE: usize = 100;
-pub const PERCENTILE: f64 = 50.0;
 
-pub type Address = usize;
 pub type Contents = u8;
 
 #[macro_export]
@@ -87,42 +84,38 @@ pub type Latencies = Vec<Time>;
 
 /// # RPP
 /// Contains the context of the RPP for a given connection.
-pub struct Rpp {
+pub struct Rpp<C> {
     params: RppParams,
-    conn: RppConnector<Contents>,
+    conn: C,
     colored_sets: ColoredSets, // maps a color code
     color_keys: ColorKeys,
     addrs: HashSet<Address>,
-    timings: Histogram<u64>, // we will be using this to dynamically scale threshold
+    classifier: TimingClassifier, // we will be using this to dynamically scale threshold
     quite: bool,
 }
 
-impl Rpp {
+impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     /// Creates a new instance with the default params.
     /// `quite` tells, whether the progress should be reported on the screen
-    pub fn new(conn: Box<dyn MemoryConnector<Item = Contents>>, quite: bool) -> Rpp {
+    pub fn new(conn: C, quite: bool) -> Rpp<C> {
         let params: CacheParams = Default::default();
         Self::with_params(conn, quite, params)
     }
 
     /// Creates a new instance with the provided params and starts building eviction sets
     /// `quite` tells, whether the progress should be reported on the screen
-    pub fn with_params(
-        conn: Box<dyn MemoryConnector<Item = Contents>>,
-        quite: bool,
-        cparams: CacheParams,
-    ) -> Rpp {
-        let hist = Histogram::new(5).expect("could not create hist"); // 5 sets the precision and it is the maximum possible
+    pub fn with_params(conn: C, quite: bool, cparams: CacheParams) -> Rpp<C> {
+        let classifier = TimingClassifier::new();
         let params: RppParams = cparams.into();
 
         let mut rpp = Rpp {
             colored_sets: ColoredSets::with_capacity(params.n_colors),
             color_keys: ColorKeys::with_capacity(params.n_colors),
             params,
-            conn: conn.into(),
+            conn,
             // TODO: do we really need ADDR_NUM here? We need at least as much page as there are colors. Maybe manipulate `params.n_colors`?
             addrs: (0usize..ADDR_NUM).map(|x| x * PAGE_SIZE).collect(), // here we collect page aligned (e.i. at the begining of the page) adresses
-            timings: hist,
+            classifier,
             quite,
         };
         rpp.build_sets();
@@ -132,8 +125,8 @@ impl Rpp {
 
     /// Primes the given set of addresses
     pub fn prime(&mut self, set_code: &SetCode) -> Result<()> {
-        let it = self.colored_sets[set_code.0][set_code.1].clone();
-        self.conn.evict(it.into_iter())
+        let addrs = self.colored_sets[set_code.0][set_code.1].clone();
+        self.conn.cache_all(addrs.into_iter())
     }
 
     /// Probes the given set of addresses. Returns true if a set activation detected
@@ -148,14 +141,13 @@ impl Rpp {
             .collect();
         let lats = set
             .into_iter()
-            .map(|x| self.conn.time(x))
+            .map(|x| self.conn.time_access(x))
             .collect::<Result<Vec<Time>>>()?;
 
-        let max = lats.iter().max().unwrap();
-        let min = lats.iter().min().unwrap();
+        let miss = lats.iter().find(|&&lat| self.classifier.is_miss(lat));
 
-        // NOTE This might be unstable
-        if max - min > self.threshold() {
+        // We test whether an activation
+        if miss.is_some() {
             return Ok(Activated(lats));
         }
 
@@ -172,12 +164,7 @@ impl Rpp {
         set_codes.iter().map(|x| self.probe(x)).collect()
     }
 
-    /// Test whether an activation has been observed in the provided Probe Results
-    pub fn is_activated<T>(probes: &Vec<ProbeResult<T>>) -> bool {
-        probes.iter().any(ProbeResult::is_activated)
-    }
-
-    fn fill_hist(&mut self) {
+    fn train_classifier(&mut self) {
         use rand::seq::IteratorRandom;
         // we assume that the memory region is not cached
         let mut rng = rand::thread_rng();
@@ -189,56 +176,20 @@ impl Rpp {
             .choose_multiple(&mut rng, TIMINGS_INIT_FILL)
         {
             // here we read from the main memory
-            let t1 = self.conn.time(ofs).expect("Could not read in hist");
+            let miss_time = self.conn.time_access(ofs).expect("Could not read in hist");
 
-            // here we fist write the value to cache it and read again from cache
+            // here we cache the address and read again from cache
             self.conn.cache(ofs).expect("Could not write for hist");
-            let t2 = self.conn.time(ofs).expect("Could not read in hist");
+            let hit_time = self.conn.time_access(ofs).expect("Could not read in hist");
 
             // we expect the latency from main memory to be bigger that from LLC
-            if t1 < t2 {
+            if hit_time > miss_time {
                 continue;
             }
 
-            let hit_miss = t1 - t2;
-            self.timings.record(hit_miss).expect("Could not fill hist");
+            self.classifier.record(CacheTiming::Hit(hit_time));
+            self.classifier.record(CacheTiming::Miss(miss_time));
         }
-    }
-
-    #[inline(always)]
-    fn reset_timings(&mut self) {
-        self.timings.clear();
-        self.fill_hist();
-    }
-
-    fn threshold(&mut self) -> Time {
-        static mut CALLED: usize = 0;
-
-        unsafe {
-            // unsafe, because mutating static variable
-            CALLED += 1;
-            if CALLED > TIMING_REFRESH_RATE {
-                self.reset_timings();
-            }
-        }
-
-        self.timings.value_at_percentile(PERCENTILE)
-    }
-
-    fn trsh_noup(&self) -> Time {
-        self.timings.value_at_percentile(PERCENTILE)
-    }
-
-    fn record(&mut self, val: Time) {
-        self.timings
-            .record(val)
-            .expect("Failed to record new timing");
-    }
-
-    fn record_n(&mut self, val: Time, n: u64) {
-        self.timings
-            .record_n(val, n)
-            .expect("Failed to record new timing");
     }
 
     pub fn profiled(&self) -> usize {
@@ -247,27 +198,28 @@ impl Rpp {
 
     fn build_sets(&mut self) {
         if !self.quite {
-            println!(
-                "Building sets: {}",
-                style("STARTED").green()
-            )
+            println!("Building sets: {}", style("STARTED").green())
         }
-        self.conn.allocate(self.params.v_buf);
-        self.fill_hist();
+        self.conn.reserve(self.params.v_buf);
+        self.train_classifier();
 
         let pb = indicatif::ProgressBar::new(self.params.n_sets as u64);
 
         if !self.quite {
-            pb.set_style(indicatif::ProgressStyle::default_bar().template("{prefix:.bold} [{elapsed}] [{bar:40.cyan/blue}] {percent}% ({eta})")
-            .progress_chars("#>-"));
+            pb.set_style(
+                indicatif::ProgressStyle::default_bar()
+                    .template("{prefix:.bold} [{elapsed}] [{bar:40.cyan/blue}] {percent}% ({eta})")
+                    .progress_chars("#>-"),
+            );
             pb.set_prefix("Building sets:");
         }
         while self.profiled() != self.params.n_sets {
             match self.build_set() {
                 Ok(set) => self.check_set(set),
                 Err(e) => {
-                    println!("{}", style(e).red());
-                    self.reset_timings();
+                    if !self.quite {
+                        println!("{}", style(e).red());
+                    }
                 }
             }
             if !self.quite {
@@ -277,10 +229,7 @@ impl Rpp {
 
         if !self.quite {
             pb.finish_and_clear();
-            println!(
-                "Building sets: {}",
-                style("FINISHED").green()
-            );
+            println!("Building sets: {}", style("FINISHED").green());
         }
     }
 
@@ -351,91 +300,81 @@ impl Rpp {
     }
 
     fn is_unique(&mut self, color_code: ColorCode, set: &EvictionSet) -> Result<bool> {
-        const REPEATING: usize = 4; // We will try for multiple times,
+        use rand::seq::IteratorRandom;
+
+        const REPEATING: usize = 5; // We will try for multiple times,
                                     // taking the most probable result
         let mut unique = true;
         for other_set in self.colored_sets[color_code].iter() {
-            let mut results = HashMap::with_capacity(2); // Bool -> usize
+            let mut score = 0;
             for _ in 0..REPEATING {
-                *results
-                    .entry(Self::test_uniq(
-                        set,
-                        other_set,
-                        self.trsh_noup(),
-                        &mut self.conn,
-                    )?)
-                    .or_insert(0) += 1;
+                // Taking a random addr from the other set
+                let test_addr = *other_set.iter().choose(&mut rand::thread_rng()).unwrap();
+
+                // Bring it into the cache
+                self.conn.cache(test_addr)?;
+
+                // Now cache all addrs from the tested set
+                // this should cause eviction of the other set addr
+                self.conn.cache_all(set.iter().copied())?;
+
+                // We expect this to be a cache miss, as the `test_addr` got evicted
+                let lat = self.conn.time_access(test_addr)?;
+
+                if self.classifier.is_miss(lat) {
+                    score += 1;
+                } else {
+                    score -= 1;
+                }
             }
 
             // We consider the most probable result to be true
-            unique = unique && results.into_iter().max_by_key(|(_, v)| *v).unwrap().0;
+            unique = unique && score > 0;
         }
 
         Ok(unique)
     }
 
-    fn test_uniq(
-        set: &EvictionSet,
-        other_set: &EvictionSet,
-        trsh: Time,
-        conn: &mut RppConnector<Contents>,
-    ) -> Result<bool> {
-        use rand::seq::IteratorRandom;
-        let test_addr = *other_set.iter().choose(&mut rand::thread_rng()).unwrap();
-        conn.cache(test_addr)?;
-        let t1 = conn.time(test_addr)?;
-        conn.evict(set.iter().copied())?;
-        let t2 = conn.time(test_addr)?;
-
-        if t2 < t1 || t2 - t1 < trsh {
-            return Ok(false);
-        }
-        Ok(true)
-    }
-
     fn forward_selection(&mut self) -> Result<(EvictionSet, Address)> {
         let mut n = self.params.n_lines + 1;
-        let mut latencies = HashMap::new();
 
         loop {
             let mut sub_set: EvictionSet = self.addrs.iter().take(n).copied().collect();
             // First, we write the whole buffer. Some addrs might get evicted by the consequent writes.
             // If this fails, then repeating won't help
-            self.conn.evict(sub_set.iter().copied())?;
+            self.conn.cache_all(sub_set.iter().copied())?;
 
-            // Measure access time for all entries of a selected subset
-            for addr in sub_set.iter() {
-                let lat = self.conn.time(*addr)?;
-                latencies.insert(*addr, lat);
+            // Walk over all the addrs of a selected subset and finding the address with the maximum latency
+            let mut max_lat = 0;
+            let mut max_addr = 0;
+
+            for &addr in sub_set.iter() {
+                let lat = self.conn.time_access(addr)?;
+                if lat > max_lat {
+                    max_lat = lat;
+                    max_addr = addr;
+                }
             }
+            // To this end we have an address with the maximum latency. This is the candidate for
+            // building eviction set for.
 
-            // Now we find an address with the highest access time
-            let x = *latencies.iter().max_by_key(|(_, &v)| v).unwrap().0; // Take the key from the pair (which is an address with the biggest latency)
+            // Bring `max_addr` into cache  
+            self.conn.cache(max_addr)?;
 
-            // Measure cache hit time for x
-            self.conn.cache(x)?;
-            let t1 = self.conn.time(x)?;
+            // Bring all other addrs (except `max_addr` into the cache), which should cause
+            // evinction of the `max_addr`
+            sub_set.remove(&max_addr);
+            self.conn.cache_all(sub_set.iter().copied())?;
+            let lat = self.conn.time_access(max_addr)?;
 
-            // Potentially take x from the main memory
-            sub_set.remove(&x);
-            self.conn.evict(sub_set.iter().copied())?;
-            let t2 = self.conn.time(x)?;
-
-            // Both t1 and t2 are from cache
-            if t1 > t2 {
-                continue;
-            }
-            // Determine if x got evicted from the cache by this set
-            let diff = t2 - t1;
-            if diff > self.threshold() {
-                self.record_n(diff, (n / INSERT_RATE) as u64);
-                return Ok((sub_set, x));
+            // Determine if `max_addr` got evicted from the cache by this set
+            if self.classifier.is_miss(lat) {
+                self.classifier.record(CacheTiming::Miss(lat));
+                return Ok((sub_set, max_addr));
             }
 
             n += 1;
-            if n % INSERT_RATE == 0 {
-                self.record(diff);
-            }
+            self.classifier.record(CacheTiming::Hit(lat));
         }
     }
 
@@ -446,16 +385,15 @@ impl Rpp {
                 ErrorKind::Other,
                 "ERROR: the initial set for backwards selection is too narrow.",
             ));
-        } else if s.len() == self.params.n_lines {
+        }
+        if s.len() == self.params.n_lines {
             return Ok(());
         }
 
         // we may begin by trying to remove part of the overhead. If we fail, the trying less in ok
         let mut n = 1;
-        let mut i = 0;
-        let mut last_i = 0;
+
         loop {
-            i += 1;
             if s.len() < self.params.n_lines {
                 return Err(Error::new(
                     ErrorKind::Other,
@@ -467,37 +405,31 @@ impl Rpp {
             n = if s.len() <= self.params.n_lines + DELTA {
                 1
             } else {
-                min(n, s.len() / 2)
+                min(n, s.len() >> 1) // >> 1 == / 2
             };
 
             let s_rm: EvictionSet = s.iter().take(n).copied().collect();
 
-            // Measure cache hit time for x
+            // Bring `x` into cache
             self.conn.cache(x)?;
-            let t1 = self.conn.time(x)?;
 
-            // Potentially read x from the main memory
-            self.conn.evict(s.difference(&s_rm).copied())?;
-            let t2 = self.conn.time(x)?;
+            // Cache all the addrs except the selected ones
+            self.conn.cache_all(s.difference(&s_rm).copied())?;
 
-            // Both t1 and t2 are from cache
-            if t1 > t2 {
-                continue;
-            }
+            // Measure latency.
+            let lat = self.conn.time_access(x)?;
 
-            // Determine if `x` got evicted by a reduced set S\S_rm
-            let diff = t2 - t1;
-            if diff > self.threshold() {
-                self.record_n(diff, ((i - last_i) / INSERT_RATE) as u64);
-                last_i = i;
+            // Determine whether `x` got evicted by a reduced set S\S_rm
+            if self.classifier.is_miss(lat) {
+                self.classifier.record(CacheTiming::Miss(lat));
+
                 // Truly remove S_rm from S
                 s.retain(|x| !s_rm.contains(x));
+
                 // During the next step we will try to remove 10 more addrs
                 n += 10;
             } else {
-                if i % INSERT_RATE == 0 {
-                    self.record(diff);
-                }
+                self.classifier.record(CacheTiming::Hit(lat));
                 // We removed too much
                 n -= 1;
             }
@@ -512,31 +444,25 @@ impl Rpp {
     fn cleanup(&mut self, s: &EvictionSet) -> Result<()> {
         // First we remove addr in set `S` from global addr pool
         self.addrs.retain(|x| !s.contains(x));
+
         // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
+        // TODO this is an antipattern. Should avoid that
         let addrs: HashSet<usize> = self.addrs.iter().copied().collect();
-        let mut last_i = 0;
-        for (i, x) in addrs.into_iter().enumerate() {
-            // measure x hit time
+
+        for x in addrs.into_iter() {
+            // bring x into cache
             self.conn.cache(x)?;
-            let t1 = self.conn.time(x)?;
 
             // potentially read x from the main memory
-            self.conn.evict(&mut s.iter().copied())?;
-            let t2 = self.conn.time(x)?;
+            self.conn.cache_all(s.iter().copied())?;
+            let lat = self.conn.time_access(x)?;
 
-            // Both t1 and t2 are from cache
-            if t1 > t2 {
-                continue;
-            }
-
-            // We evicted x? Then we do not need it anymore
-            let diff = t2 - t1;
-            if diff > self.threshold() {
-                self.record_n(diff, ((i - last_i) / INSERT_RATE) as u64);
-                last_i = i;
+            // If we really evicted `x`, then `lat` is a cache miss. Then we do not need `x` anymore
+            if self.classifier.is_miss(lat) {
+                self.classifier.record(CacheTiming::Miss(lat));
                 self.addrs.remove(&x);
-            } else if i % INSERT_RATE == 0 {
-                self.record(diff);
+            } else {
+                self.classifier.record(CacheTiming::Hit(lat));
             }
         }
 
@@ -580,11 +506,17 @@ impl Rpp {
     }
 }
 
+/// Test whether an activation has been observed in the provided Probe Results
+#[inline(always)]
+pub fn has_activation<T>(probes: &Vec<ProbeResult<T>>) -> bool {
+    probes.iter().any(ProbeResult::is_activated)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn new_rpp_test() {
-        let conn = Box::new(crate::connection::local::LocalMemoryConnector::new());
+        let conn = crate::connection::local::LocalMemoryConnector::new();
         super::Rpp::new(conn, false);
     }
 

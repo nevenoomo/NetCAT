@@ -1,7 +1,7 @@
 //! # RDMA
 //! This module is responsible for RDMA connections and maintaining overall RDMA state
 #![allow(dead_code)]
-use crate::connection::{MemoryConnector, Time};
+use crate::connection::{Address, CacheConnector, MemoryConnector, Time};
 use bincode;
 use ibverbs;
 use std::convert::TryInto;
@@ -47,24 +47,18 @@ impl RdmaServerConnector {
         let dev_list = Self::get_devs()?;
 
         // Get the first device
-        let dev = match dev_list.get(0) {
-            Some(d) => d,
-            None => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "ERROR: No RDMA devices in list",
-                ))
-            }
-        };
+        let dev = dev_list.get(0).ok_or(Error::new(
+            ErrorKind::Other,
+            "ERROR: No RDMA devices in list",
+        ))?;
 
         // Here the device is opened. Port (1) and GID are queried automaticaly
-        match dev.open() {
-            Ok(c) => Ok(c),
-            Err(e) => Err(Error::new(
+        dev.open().map_err(|e| {
+            Error::new(
                 ErrorKind::Other,
                 format!("ERROR: aquiring RDMA context failed: {}", e),
-            )),
-        }
+            )
+        })
     }
 
     fn aquire_pd(ctx: Arc<ibverbs::Context>) -> Result<Arc<ibverbs::ProtectionDomain>> {
@@ -79,15 +73,12 @@ impl RdmaServerConnector {
     }
 
     fn aquire_cq(ctx: Arc<ibverbs::Context>) -> Result<Arc<ibverbs::CompletionQueue>> {
-        let dev_attr = match ctx.query_device() {
-            Ok(da) => da,
-            Err(e) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("ERROR: cannot get device attributes: {}", e),
-                ))
-            }
-        };
+        let dev_attr = ctx.query_device().map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("ERROR: cannot get device attributes: {}", e),
+            )
+        })?;
 
         // Create Complition Queue
         match ctx.create_cq(dev_attr.max_cqe, 0) {
@@ -121,15 +112,12 @@ impl RdmaServerConnector {
     ) -> Result<InitializedQp> {
         let qp_init = {
             let qp_builder = pd.create_qp(cq, cq, ibverbs::ibv_qp_type::IBV_QPT_RC); // client access flags default to ALLOW_LOCAL_WRITES which is ok
-            match qp_builder.build() {
-                Ok(qp) => qp,
-                Err(e) => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        format!("ERROR: failed to initialize Queue Pair: {}", e),
-                    ))
-                }
-            }
+            qp_builder.build().map_err(|e| {
+                Error::new(
+                    ErrorKind::Other,
+                    format!("ERROR: failed to initialize Queue Pair: {}", e),
+                )
+            })?
         };
 
         // This info will be sended to the remote server,
@@ -162,45 +150,36 @@ impl RdmaServerConnector {
         msg.rkey = lkey; //self.mr.rkey();
         msg.raddr = laddr;
 
-        let mut stream = match net::TcpStream::connect(addr) {
-            Ok(st) => st,
-            Err(e) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("ERROR: failed to connect to server: {}", e),
-                ))
-            }
-        };
+        let mut stream = net::TcpStream::connect(addr).map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("ERROR: failed to connect to server: {}", e),
+            )
+        })?;
 
-        let ser_msg = match bincode::serialize(&msg) {
-            Ok(data) => data,
-            Err(e) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("ERROR: failed to serialize message: {}", e),
-                ))
-            }
-        };
+        let ser_msg = bincode::serialize(&msg).map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("ERROR: failed to serialize message: {}", e),
+            )
+        })?;
 
         // Sending info for RDMA handshake over TcpStream;
         // NOTE using writers in such a way may cause issues. May use .try_clone() instead
-        if let Err(e) = bincode::serialize_into(&mut stream, &ser_msg) {
-            return Err(Error::new(
+        bincode::serialize_into(&mut stream, &ser_msg).map_err(|e| {
+            Error::new(
                 ErrorKind::Other,
                 format!("ERROR: failed to transmit serealized message: {}", e),
-            ));
-        }
+            )
+        })?;
 
         // Recieving and desirializing info from the server
-        let rmsg: ibverbs::EndpointMsg = match bincode::deserialize_from(&mut stream) {
-            Ok(data) => data,
-            Err(e) => {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    format!("ERROR: failed to recieve data: {}", e),
-                ))
-            }
-        };
+        let rmsg: ibverbs::EndpointMsg = bincode::deserialize_from(&mut stream).map_err(|e| {
+            Error::new(
+                ErrorKind::Other,
+                format!("ERROR: failed to recieve data: {}", e),
+            )
+        })?;
 
         Ok(rmsg)
     }
@@ -233,38 +212,35 @@ impl RdmaServerConnector {
     /// Panics if there is no support for RDMA in the kernel, no RDMA devices where found,
     /// or if a device cannot be opened
     pub fn new<A: net::ToSocketAddrs>(addr: A) -> RdmaServerConnector {
-        Self::setup_ib(addr).unwrap_or_else(|e| panic!("{}", e))
+        Self::setup_ib(addr).unwrap()
     }
 
     fn get_devs() -> Result<ibverbs::DeviceList> {
-        match ibverbs::devices() {
-            Ok(dl) => Ok(dl),
-            Err(e) => Err(Error::new(
+        ibverbs::devices().map_err(|e| {
+            Error::new(
                 ErrorKind::Other,
                 format!("ERROR: cannot get device list: {}", e),
-            )),
-        }
+            )
+        })
     }
 
     fn fork_init() -> Result<()> {
-        let res;
         // in case we use fork latter
-        unsafe {
-            res = ibverbs::ffi::ibv_fork_init();
-        }
 
-        match res {
-            0 => Ok(()),
-            _ => Err(Error::new(
+        if unsafe { ibverbs::ffi::ibv_fork_init() } != 0 {
+            return Err(Error::new(
                 ErrorKind::Other,
                 format!(
                     "ERROR: could not initialize fork: {}",
                     Error::last_os_error()
                 ),
-            )),
+            ));
         }
+
+        Ok(())
     }
 
+    #[inline(always)]
     fn post_read(&self, addr: u64) -> Result<()> {
         unsafe {
             self.iqp.qp.post_read_single(
@@ -277,6 +253,7 @@ impl RdmaServerConnector {
         }
     }
 
+    #[inline(always)]
     fn post_write(&self, addr: u64) -> Result<()> {
         unsafe {
             self.iqp.qp.post_write_single(
@@ -289,6 +266,7 @@ impl RdmaServerConnector {
         }
     }
 
+    #[inline(always)]
     fn post_read_buf(&self, addr: u64, n: usize) -> Result<()> {
         unsafe {
             self.iqp.qp.post_read_buf(
@@ -302,6 +280,7 @@ impl RdmaServerConnector {
         }
     }
 
+    #[inline(always)]
     fn post_write_buf(&self, addr: u64, n: usize) -> Result<()> {
         unsafe {
             self.iqp.qp.post_write_buf(
@@ -315,33 +294,36 @@ impl RdmaServerConnector {
         }
     }
 
+    #[inline(always)]
     fn poll_cq_is_done(&self, compl: &mut [ibverbs::ffi::ibv_wc]) -> Result<()> {
         loop {
-            let completed = match self.cq.poll(compl) {
-                Ok(o) => o,
-                Err(_) => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        format!("ERROR: could not poll CQ: {}", Error::last_os_error()),
-                    ))
-                }
-            };
+            let completed = self.cq.poll(compl).expect("ERROR: Could not poll CQ.");
             if completed.is_empty() {
                 continue;
             }
-            match completed.iter().find(|wc| wc.wr_id() == WR_ID) {
-                Some(_) => return Ok(()),
-                None => continue,
+            if completed.iter().find(|wc| wc.wr_id() == WR_ID).is_some() {
+                return Ok(());
             }
         }
+    }
+
+    #[inline(always)]
+    fn write_from_mr(&mut self, addr: Address) -> Result<()> {
+        let mut completions = [ibverbs::ibv_wc::default(); 16];
+        self.post_write(self.iqp.raddr.0 + (addr as u64))?;
+        self.poll_cq_is_done(&mut completions)?;
+
+        Ok(())
     }
 }
 
 impl MemoryConnector for RdmaServerConnector {
     type Item = RdmaPrimitive;
 
+    #[inline(always)]
     fn allocate(&mut self, _size: usize) {}
 
+    #[inline(always)]
     fn read(&self, ofs: usize) -> Result<Self::Item> {
         let mut completions = [ibverbs::ibv_wc::default(); 16];
         self.post_read(self.iqp.raddr.0 + (ofs as u64))?;
@@ -350,6 +332,7 @@ impl MemoryConnector for RdmaServerConnector {
         Ok(self.mr.read().unwrap()[0])
     }
 
+    #[inline(always)]
     fn read_timed(&self, ofs: usize) -> Result<(Self::Item, Time)> {
         let now = Instant::now();
         let item = self.read(ofs)?; // allocation time is nearly constant, thus it won't affect measurements
@@ -362,27 +345,19 @@ impl MemoryConnector for RdmaServerConnector {
         Ok((item, elapsed))
     }
 
-    fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()> {
-        let mut completions = [ibverbs::ibv_wc::default(); 16];
+    #[inline(always)]
+    // FIXIT this is not safe concurently
+    fn write(&mut self, addr: usize, what: &Self::Item) -> Result<()> {
+        // the desired value is taken from the memory region
         {
-            let mut buf = match self.mr.write() {
-                Ok(b) => b,
-                Err(_) => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        "ERROR: could not aquire write lock",
-                    ))
-                }
-            };
+            let mut buf = self.mr.write().expect("ERROR: could not aquire write lock");
             buf[0] = *what;
         }
-
-        self.post_write(self.iqp.raddr.0 + (ofs as u64))?;
-        self.poll_cq_is_done(&mut completions)?;
-
-        Ok(())
+        
+        self.write_from_mr(addr)
     }
 
+    #[inline(always)]
     fn write_timed(&mut self, ofs: usize, what: &Self::Item) -> Result<Time> {
         let now = Instant::now();
         self.write(ofs, what)?;
@@ -395,6 +370,7 @@ impl MemoryConnector for RdmaServerConnector {
         Ok(elapsed)
     }
 
+    #[inline(always)]
     fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize> {
         let mut completions = [ibverbs::ibv_wc::default(); 16];
 
@@ -407,6 +383,7 @@ impl MemoryConnector for RdmaServerConnector {
         Ok(buf.len())
     }
 
+    #[inline(always)]
     fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize, Time)> {
         let now = Instant::now();
         let n = self.read_buf(ofs, buf)?; // allocation time is nearly constant, thus it won't affect measurements
@@ -419,6 +396,7 @@ impl MemoryConnector for RdmaServerConnector {
         Ok((n, elapsed))
     }
 
+    #[inline(always)]
     fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize> {
         let mut completions = [ibverbs::ibv_wc::default(); 16];
         {
@@ -440,6 +418,7 @@ impl MemoryConnector for RdmaServerConnector {
         Ok(buf.len())
     }
 
+    #[inline(always)]
     fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)> {
         let now = Instant::now();
         let n = self.write_buf(ofs, buf)?;
@@ -450,5 +429,25 @@ impl MemoryConnector for RdmaServerConnector {
             .unwrap_or(Time::max_value());
 
         Ok((n, elapsed))
+    }
+}
+
+impl CacheConnector for RdmaServerConnector {
+    type Item = RdmaPrimitive;
+
+    // TODO might cange it to allocate a new memory region
+    #[inline(always)]
+    fn reserve(&mut self, _size: usize) {}
+
+    #[inline(always)]
+    fn cache(&mut self, addr: Address) -> Result<()> {
+        // we do not really care of the contents of the MR
+        // as the writen value will not be used
+        self.write_from_mr(addr)
+    }
+
+    #[inline(always)]
+    fn time_access(&mut self, addr: Address) -> Result<Time> {
+        self.read_timed(addr).map(|(_, t)| t)
     }
 }

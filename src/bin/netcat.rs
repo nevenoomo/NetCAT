@@ -62,47 +62,32 @@ fn app_cli_config<'a, 'b>() -> App<'a, 'b> {
 
 mod uninteractive {
     use clap::ArgMatches;
-    use console::style;
     use get_if_addrs::get_if_addrs;
     use netcat::connection::{local::LocalMemoryConnector, rdma::RdmaServerConnector};
-    use netcat::online_tracker;
-    pub fn run_session(args: ArgMatches) {
-        let mut tracker;
 
+    pub fn run_session(args: ArgMatches) {
         let quite = args.is_present("quite");
         let port = args.value_of("port").unwrap().parse::<u16>().unwrap();
         // NOTE Unwraping is ok as we have a default value
         if args.value_of("connection").unwrap() == "rdma" {
             // these are required for rdma and validated
             let ip = args.value_of("address").unwrap();
-            let conn = Box::new(RdmaServerConnector::new((ip, port)));
-            tracker = online_tracker::OnlineTracker::new(ip, conn, quite).unwrap();
+            let conn = RdmaServerConnector::new((ip, port));
+
+            super::measurements::do_measurements((ip, port), conn, quite);
         } else {
             // this is a local scenario
             // but we still need an address for synchronization
-            let addr = get_if_addrs()
+            let ip = get_if_addrs()
                 .expect("ERROR: Could not get machine network interfaces")
                 .into_iter()
                 .filter(|i| !i.is_loopback())
                 .next()
                 .expect("ERROR: no network interface found")
                 .ip();
-            let conn = Box::new(LocalMemoryConnector::new());
-            tracker = online_tracker::OnlineTracker::new((addr, port), conn, quite).unwrap();
-        }
-        if let Err(e) = tracker.track() {
-            if !quite {
-                println!(
-                    "Online Tracker: {}",
-                    style(e).red()
-                );
-            }
-        }
-        if !quite {
-            println!(
-                "Online Tracker: {}",
-                style("MEASUREMENTS COMPLETED").green()
-            );
+            let conn = LocalMemoryConnector::new();
+
+            super::measurements::do_measurements((ip, port), conn, quite);
         }
     }
 }
@@ -111,5 +96,34 @@ mod interactive {
     use clap::ArgMatches;
     pub fn run_session(_args: ArgMatches) {
         println!("I am interactive");
+    }
+}
+
+mod measurements {
+    use netcat::connection::CacheConnector;
+    use netcat::online_tracker;
+    use netcat::rpp::Contents;
+    use std::net::ToSocketAddrs;
+    use console::style;
+
+
+    pub fn do_measurements<A, C>(addr: A, conn: C, quite: bool)
+    where
+        A: ToSocketAddrs,
+        C: CacheConnector<Item = Contents>,
+    {
+        let mut tracker = online_tracker::OnlineTracker::new(addr, conn, quite).unwrap();
+
+        if let Err(e) = tracker.track() {
+            if !quite {
+                println!("Online Tracker: {}", style(e).red());
+            }
+        }
+        if !quite {
+            println!(
+                "Online Tracker: {}",
+                style("MEASUREMENTS COMPLETED").green()
+            );
+        }        
     }
 }

@@ -2,11 +2,28 @@
 //! This module provides a number of uniform interfaces for different connections.
 pub mod local;
 pub mod rdma;
-pub type Time = u64;
-
 use std::io::Result;
 
-/// # MemoryConnector
+pub type Time = u64;
+pub type Address = usize;
+
+// TODO maybe use this macro
+// #[macro_export]
+// macro_rules! timed {
+//     ($(s:stmt)*) => {{
+//         use std::time::Instant;
+//         let now = Instant::now();
+//         $(
+//             $s
+//         )*
+//         now
+//             .elapsed()
+//             .as_nanos()
+//             .try_into()
+//             .unwrap_or(Time::max_value())
+//     }};
+// }
+
 /// Interface for accessing memory depending on the offset.
 pub trait MemoryConnector {
     type Item;
@@ -36,4 +53,25 @@ pub trait MemoryConnector {
 
     /// Write provided buffer to the memory region at the given offset. If successful, then the number of written bytes latency is returned, else - the `error` is returned.
     fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)>;
+}
+
+/// Interface for manipulating processor cache
+pub trait CacheConnector {
+    /// A memory item, which will be used
+    type Item;
+
+    /// Caches a memory item at the given address
+    fn cache(&mut self, addr: Address) -> Result<()>;
+
+    #[inline(always)]
+    /// Caches all given addresses
+    fn cache_all<I: Iterator<Item = Address>>(&mut self, mut addrs: I) -> Result<()> {
+        addrs.try_for_each(|addr| self.cache(addr))
+    }
+
+    /// Times access to the given address
+    fn time_access(&mut self, addr: Address) -> Result<Time>;
+
+    /// Reserves memory to be used for operations
+    fn reserve(&mut self, size: usize);
 }

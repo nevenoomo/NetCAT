@@ -9,7 +9,7 @@ pub fn rpp_bench(c: &mut Criterion) {
 
     group.bench_function("RPP bench", |b| {
         b.iter(|| {
-            let conn = Box::new(LocalMemoryConnector::new());
+            let conn = LocalMemoryConnector::new();
             let quite = true;
             let _rpp = Rpp::new(conn, quite);
         })

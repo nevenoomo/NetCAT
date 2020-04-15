@@ -5,12 +5,13 @@
 mod pattern;
 mod tracking;
 
-use crate::connection::MemoryConnector;
+use crate::connection::CacheConnector;
 pub use crate::connection::Time;
 pub use crate::rpp::{
-    ColorCode, ColoredSetCode, Contents, Latencies, ProbeResult, ProbeResult::*, Rpp, SetCode,
+    has_activation, ColorCode, ColoredSetCode, Contents, Latencies, ProbeResult, ProbeResult::*,
+    Rpp, SetCode,
 };
-use pattern::{Pattern, PatternIdx};
+use pattern::{Pattern, PatternIdx, PossiblePatterns};
 use std::collections::HashMap;
 use std::io::Result;
 use std::io::{Error, ErrorKind};
@@ -20,38 +21,37 @@ pub use tracking::SyncStatus;
 use tracking::TrackingContext;
 
 pub type SavedLats = Vec<(Vec<ProbeResult<Latencies>>, SyncStatus, Time)>;
-type PossiblePatterns = HashMap<ColorCode, Vec<Option<ColoredSetCode>>>;
 
 const REPEATINGS: usize = 8;
 const MEASUREMENT_CNT: usize = 10000;
 const MAX_FAIL_CNT: usize = 100;
 
-pub struct OnlineTracker {
-    rpp: Rpp,
+pub struct OnlineTracker<C> {
+    rpp: Rpp<C>,
     sock: UdpSocket,
     pattern: Pattern,
     latencies: SavedLats,
     quite: bool,
 }
 
-impl OnlineTracker {
-    /// Creates a new online tracker. 
-    /// 
+impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
+    /// Creates a new online tracker.
+    ///
     /// # Arguements
-    /// 
+    ///
     /// - `addr` - Socket Address of the victim server (used for control packets, like synchronization of ring buffer possition)
     /// - `conn` - A memory connector, which will be used for communication with the server  
     /// - `quite` - Whether Online Tracker should report the progress
-    /// 
+    ///
     /// # Fails
-    /// 
+    ///
     /// Fails if port 9009 is used on the attacker machine or if the given
     /// address is unapropriet for connecting to.  
-    pub fn new<A: ToSocketAddrs + Clone>(
+    pub fn new<A: ToSocketAddrs>(
         addr: A,
-        conn: Box<dyn MemoryConnector<Item = Contents>>,
-        quite: bool
-    ) -> Result<OnlineTracker> {
+        conn: C,
+        quite: bool,
+    ) -> Result<OnlineTracker<C>> {
         let rpp = Rpp::new(conn, quite);
         let sock = UdpSocket::bind("0.0.0.0:9009")?;
         sock.connect(addr)?;
@@ -66,7 +66,7 @@ impl OnlineTracker {
         })
     }
 
-    /// Sets the verbosity of the Online Tracker instance 
+    /// Sets the verbosity of the Online Tracker instance
     pub fn set_quite(&mut self, quite: bool) {
         self.quite = quite;
     }
@@ -85,7 +85,6 @@ impl OnlineTracker {
     // UGLY maybe there is some other way to handle retries?
     pub fn track(&mut self) -> Result<()> {
         use console::style;
-        
         let mut err_cnt = 0;
         let quite = self.quite;
 
@@ -113,7 +112,10 @@ impl OnlineTracker {
         }
 
         if !quite {
-            println!("Online Tracker: {}", style("MEASUREMENTS COMPLETED").green());
+            println!(
+                "Online Tracker: {}",
+                style("MEASUREMENTS COMPLETED").green()
+            );
         }
 
         Ok(())
@@ -130,7 +132,7 @@ impl OnlineTracker {
     /// of data.
     fn locate_rx(&mut self) -> Result<()> {
         let patterns = self.locate_rx_round()?;
-        self.pattern = Self::find_pattern(patterns)?;
+        self.pattern = Pattern::find(patterns)?;
 
         Ok(())
     }
@@ -205,78 +207,6 @@ impl OnlineTracker {
         Ok(())
     }
 
-    fn find_pattern(patterns: PossiblePatterns) -> Result<Pattern> {
-        let mut fnd_pts = HashMap::with_capacity(1);
-
-        for (color_code, pattern) in patterns {
-            let record = Self::pattern_to_rec(pattern);
-
-            let pat = match Self::pat_from_rec(record) {
-                Some(pat) => pat,
-                None => continue,
-            };
-
-            fnd_pts.insert(color_code, pat);
-        }
-
-        // For now, we expect only one pattern to arise. If not, then other methods should be used
-        // NOTE one may add confidence level for each pattern, based on the statistics for each entry in
-        // a pattern
-        // UGLY should have a separete error type
-        if fnd_pts.len() != 1 {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "ERROR: Cannot decide on pattern",
-            ));
-        }
-
-        let (color_code, pat) = fnd_pts.into_iter().next().unwrap();
-        let set_code_pat = pat
-            .into_iter()
-            .map(|colored_set_code| SetCode(color_code, colored_set_code))
-            .collect();
-
-        Ok(set_code_pat)
-    }
-
-    /// Given a repeated pattern, count which elements repeat on each position
-    fn pattern_to_rec(pattern: Vec<Option<ColoredSetCode>>) -> Vec<HashMap<ColoredSetCode, usize>> {
-        let chunk_len = pattern.len() / REPEATINGS;
-        let mut record = vec![HashMap::new(); chunk_len];
-
-        for (i, v) in pattern.iter().enumerate() {
-            if let Some(colored_set_code) = v {
-                let cnt = record[i % chunk_len].entry(*colored_set_code).or_insert(0);
-                *cnt += 1;
-            }
-        }
-
-        record
-    }
-
-    fn pat_from_rec(rec: Vec<HashMap<ColoredSetCode, usize>>) -> Option<Vec<ColoredSetCode>> {
-        rec.into_iter().map(Self::get_max_repeating).collect()
-    }
-
-    /// Return None if cannot determine most repeating element.
-    fn get_max_repeating(hm: HashMap<ColoredSetCode, usize>) -> Option<ColoredSetCode> {
-        if hm.is_empty() {
-            return None;
-        }
-
-        let (colored_set_code, cnt) = hm.iter().max_by_key(|(_, &cnt)| cnt)?;
-
-        // Check uniqueness of the maximum. If not, then we cannot determine that it is a real max
-        if hm
-            .iter()
-            .any(|(cc, cnt1)| cnt == cnt1 && cc != colored_set_code)
-        {
-            return None;
-        }
-
-        Some(*colored_set_code)
-    }
-
     fn measure(&mut self) -> Result<()> {
         let init_pos = self.get_init_pos()?;
         let mut ctx = TrackingContext::new(init_pos);
@@ -303,7 +233,7 @@ impl OnlineTracker {
                 // we stop. Any activation in the window should be registered.
                 // If the packet got injected, then it is the syncroniztion phase
                 // and we should deside on how to handle it
-                if Rpp::is_activated(&probe_res) || ctx.is_injected() {
+                if has_activation(&probe_res) || ctx.is_injected() {
                     break;
                 }
             }
@@ -349,6 +279,7 @@ impl OnlineTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use super::pattern::Pattern;
 
     #[test]
     fn pattern_finding() {
@@ -393,7 +324,7 @@ mod tests {
         let mut hm = HashMap::new();
         hm.insert(0, measurements);
 
-        let pattern = OnlineTracker::find_pattern(hm).expect("No pattern found");
+        let pattern = Pattern::find(hm).expect("No pattern found");
         assert_eq!(expected, pattern, "The pattern is incorrect");
     }
 }
