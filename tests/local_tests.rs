@@ -1,47 +1,54 @@
+#![feature(asm)]
+
 use rand::{self, Rng};
 use std::time::{SystemTime, Instant};
 
 #[test]
 fn local_latency() {
-    let mut buf = vec![1; 8388608];
+    // By doing such a buffer we fool the prefetcher and can ditinguish hits and misses
+    let mut buf = vec![vec![0u8; 4096]; 8388608 / 4096];
     let mut rng = rand::thread_rng();
     let mut lats = Vec::new();
+    let mut fail_cnt = 0;
 
-    // Evict the whole cache
-    #[cfg(not(feature = "clflush"))]
-    for v in buf.iter_mut() {
-        *v = rand::random();
-    }
-    #[cfg(feature = "clflush")]
-    netcat::connection::local::flush(&buf);
-
-    for _ in 0..10000 {
+    for _ in 0..80000 {
         let ofs = rng.gen_range(0, 8388608);
         println!("Addr: {}", ofs);
+        let ofs_hi = (ofs as usize) >> 12;
+        let ofs_lo = (ofs as usize) & 0xfff;
+
+        let sub_buf = &buf[ofs_hi];
+        // let buf_addr = buf[ofs_hi].as_mut_ptr();
 
         // Measure evicted x time
         let now = Instant::now();
-        let _x1 = buf[ofs];
+        let _x1 = sub_buf[ofs_lo];
         let elapsed1 = now.elapsed().as_nanos();
-        println!("Evicted address access time: {}ns", elapsed1);
+
+        // let elapsed1 = time_r(unsafe { buf_addr.offset(ofs & 0xfff) });
 
         // Measure in cache x time
-        buf[ofs] = rand::random();
         let now = Instant::now();
-        let _x1 = buf[ofs];
+        let _x2 = sub_buf[ofs_lo];
         let elapsed2 = now.elapsed().as_nanos();
 
-        if elapsed1 < elapsed2 {
+
+        // let elapsed2 = time_r(unsafe { buf_addr.offset(ofs & 0xfff) });
+
+        if elapsed1 <= elapsed2 {
+            fail_cnt += 1;
             continue;
         }
 
-        println!("In cache address access time: {}ns", elapsed2);
-        println!("Difference: {}ns", elapsed1 - elapsed2);
-
+        println!("Evicted address access time: {}", elapsed1);
+        println!("In cache address access time: {}", elapsed2);
+        println!("Difference: {}", elapsed1 - elapsed2);
+        
         lats.push(elapsed1 - elapsed2);
     }
     lats.sort();
-    println!("All lats: {:?}", lats);
+
+    println!("Fails: {}", fail_cnt);
     println!("Median: {}", lats[(lats.len() - 1) / 2]);
 }
 
@@ -63,6 +70,7 @@ fn cache_allocation_test() {
     let now = SystemTime::now();
     let _x = buf[ofs];
     let elapsed1 = now.elapsed().unwrap().as_nanos();
+
     let now = SystemTime::now();
     let _x = buf[ofs];
     let elapsed2 = now.elapsed().unwrap().as_nanos();

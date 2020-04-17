@@ -79,8 +79,6 @@ impl TimingClassifier {
                 self.miss_centroid = self.misses.value_at_percentile(PERCENTILE) as i128;
             }
         }
-        // DEBUG
-        println!("Centroids: hit - {}, miss - {}", self.hit_centroid, self.miss_centroid);
     }
 
     /// Classifies the given timing. If undecisive (which should not generally occur), defaults to cache hit

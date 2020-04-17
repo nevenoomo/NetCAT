@@ -1,10 +1,11 @@
-use crate::connection::{MemoryConnector, CacheConnector, Time, Address};
+use crate::connection::{Address, CacheConnector, MemoryConnector, Time};
 use std::convert::TryInto;
 use std::io::Result;
+use std::cmp::max;
 
 #[derive(Default)]
 pub struct LocalMemoryConnector {
-    buf: Vec<u8>,
+    buf: Vec<Vec<u8>>,
 }
 
 impl LocalMemoryConnector {
@@ -13,13 +14,10 @@ impl LocalMemoryConnector {
     }
 }
 
-#[cfg(feature = "clflush")]
-pub fn flush<T>(buf: &[T]) {
-    for v in buf.iter() {
-        let p = (v as *const T).cast();
-        unsafe {
-            core::arch::x86_64::_mm_clflush(p);
-        }
+pub fn flush<T>(p: *const T) {
+    let p = p as *const u8;
+    unsafe {
+        core::arch::x86_64::_mm_clflush(p);
     }
 }
 
@@ -28,17 +26,17 @@ impl MemoryConnector for LocalMemoryConnector {
 
     #[inline(always)]
     fn allocate(&mut self, size: usize) {
-        self.buf = vec![1u8; size];
+        self.buf = vec![vec![1u8; 4096]; max(1, size >> 12)];
     }
 
     #[inline(always)]
     fn read(&self, ofs: usize) -> Result<Self::Item> {
-        Ok(self.buf[ofs])
+        Ok(self.buf[ofs >> 12][ofs & 0xfff])
     }
 
     #[inline(always)]
     fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()> {
-        self.buf[ofs] = *what;
+        self.buf[ofs >> 12][ofs & 0xfff] = *what;
 
         Ok(())
     }
@@ -67,46 +65,6 @@ impl MemoryConnector for LocalMemoryConnector {
 
         Ok(elapsed)
     }
-
-    #[inline(always)]
-    fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize> {
-        buf.copy_from_slice(&self.buf[ofs..ofs + buf.len()]);
-
-        Ok(buf.len())
-    }
-
-    #[inline(always)]
-    fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize, Time)> {
-        let now = std::time::Instant::now();
-        let n = self.read_buf(ofs, buf)?;
-        let elapsed = now
-            .elapsed()
-            .as_nanos()
-            .try_into()
-            .unwrap_or(Time::max_value());
-
-        Ok((n, elapsed))
-    }
-
-    #[inline(always)]
-    fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize> {
-        (&mut self.buf[ofs..ofs + buf.len()]).copy_from_slice(buf);
-
-        Ok(buf.len())
-    }
-
-    #[inline(always)]
-    fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)> {
-        let now = std::time::Instant::now();
-        let n = self.write_buf(ofs, buf)?;
-        let elapsed = now
-            .elapsed()
-            .as_nanos()
-            .try_into()
-            .unwrap_or(Time::max_value());
-
-        Ok((n, elapsed))
-    }
 }
 
 impl CacheConnector for LocalMemoryConnector {
@@ -116,7 +74,7 @@ impl CacheConnector for LocalMemoryConnector {
     fn cache(&mut self, addr: usize) -> Result<()> {
         self.read(addr)?;
         Ok(())
-    } 
+    }
 
     #[inline(always)]
     fn time_access(&mut self, addr: Address) -> Result<Time> {
@@ -127,7 +85,6 @@ impl CacheConnector for LocalMemoryConnector {
             .as_nanos()
             .try_into()
             .unwrap_or(Time::max_value());
-        
         Ok(elapsed)
     }
 

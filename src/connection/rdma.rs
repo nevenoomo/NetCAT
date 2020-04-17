@@ -369,67 +369,6 @@ impl MemoryConnector for RdmaServerConnector {
 
         Ok(elapsed)
     }
-
-    #[inline(always)]
-    fn read_buf(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<usize> {
-        let mut completions = [ibverbs::ibv_wc::default(); 16];
-
-        self.post_read_buf(self.iqp.raddr.0 + (ofs as u64), buf.len())?;
-        self.poll_cq_is_done(&mut completions)?;
-
-        let src = self.mr.read().unwrap();
-        buf.copy_from_slice(&src[..buf.len()]);
-
-        Ok(buf.len())
-    }
-
-    #[inline(always)]
-    fn read_buf_timed(&self, ofs: usize, buf: &mut [Self::Item]) -> Result<(usize, Time)> {
-        let now = Instant::now();
-        let n = self.read_buf(ofs, buf)?; // allocation time is nearly constant, thus it won't affect measurements
-        let elapsed = now
-            .elapsed()
-            .as_nanos()
-            .try_into()
-            .unwrap_or(Time::max_value());
-
-        Ok((n, elapsed))
-    }
-
-    #[inline(always)]
-    fn write_buf(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<usize> {
-        let mut completions = [ibverbs::ibv_wc::default(); 16];
-        {
-            let mut dst = match self.mr.write() {
-                Ok(b) => b,
-                Err(_) => {
-                    return Err(Error::new(
-                        ErrorKind::Other,
-                        "ERROR: could not aquire write lock",
-                    ))
-                }
-            };
-            (&mut dst[..buf.len()]).copy_from_slice(buf);
-        }
-
-        self.post_write_buf(self.iqp.raddr.0 + (ofs as u64), buf.len())?;
-        self.poll_cq_is_done(&mut completions)?;
-
-        Ok(buf.len())
-    }
-
-    #[inline(always)]
-    fn write_buf_timed(&mut self, ofs: usize, buf: &[Self::Item]) -> Result<(usize, Time)> {
-        let now = Instant::now();
-        let n = self.write_buf(ofs, buf)?;
-        let elapsed = now
-            .elapsed()
-            .as_nanos()
-            .try_into()
-            .unwrap_or(Time::max_value());
-
-        Ok((n, elapsed))
-    }
 }
 
 impl CacheConnector for RdmaServerConnector {
