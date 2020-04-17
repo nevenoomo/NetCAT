@@ -3,6 +3,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 const DEFAULT_PORT: &str = "9003";
+const DEFAULT_MEASUREMENT_CNT: &str = "10000";
 
 fn main() {
     let matches = app_cli_config().get_matches();
@@ -55,26 +56,40 @@ fn app_cli_config<'a, 'b>() -> App<'a, 'b> {
                     Err(_) => Err(String::from("Faulty port")),
                 }),
         )
+        .arg(
+            Arg::with_name("measurements")
+                .help("The number of measurements to be taken")
+                .long("measurements")
+                .short("m")
+                .takes_value(true)
+                .default_value(DEFAULT_MEASUREMENT_CNT)
+                .value_name("MESUREMENTS")
+                .validator(|num_str| match num_str.parse::<usize>() {
+                    Ok(_) => Ok(()),
+                    Err(_) => Err(String::from("MEAUSEMENTS should be a number")),
+                }),
+        )
         .arg_from_usage("[quite] -q --quite 'Does not disturb anyone by the output'")
         .arg_from_usage("[interactive] -i --interactive 'Sets the program into interactive mode'")
         .arg_from_usage("[output] 'Output file to dump data to'")
 }
 
 mod uninteractive {
-    use clap::ArgMatches;
+    use clap::{value_t, ArgMatches};
     use get_if_addrs::get_if_addrs;
     use netcat::connection::{local::LocalMemoryConnector, rdma::RdmaServerConnector};
 
     pub fn run_session(args: ArgMatches) {
         let quite = args.is_present("quite");
-        let port = args.value_of("port").unwrap().parse::<u16>().unwrap();
-        // NOTE Unwraping is ok as we have a default value
+        let port = value_t!(args.value_of("port"), u16).unwrap();
+        let cnt = value_t!(args.value_of("measurements"), usize).unwrap();
+        // Unwraping is ok as we have a default value
         if args.value_of("connection").unwrap() == "rdma" {
             // these are required for rdma and validated
             let ip = args.value_of("address").unwrap();
             let conn = RdmaServerConnector::new((ip, port));
 
-            super::measurements::do_measurements((ip, port), conn, quite);
+            super::measurements::do_measurements((ip, port), conn, cnt, quite);
         } else {
             // this is a local scenario
             // but we still need an address for synchronization
@@ -87,7 +102,7 @@ mod uninteractive {
                 .ip();
             let conn = LocalMemoryConnector::new();
 
-            super::measurements::do_measurements((ip, port), conn, quite);
+            super::measurements::do_measurements((ip, port), conn, cnt, quite);
         }
     }
 }
@@ -100,21 +115,20 @@ mod interactive {
 }
 
 mod measurements {
+    use console::style;
     use netcat::connection::CacheConnector;
     use netcat::online_tracker;
     use netcat::rpp::Contents;
     use std::net::ToSocketAddrs;
-    use console::style;
 
-
-    pub fn do_measurements<A, C>(addr: A, conn: C, quite: bool)
+    pub fn do_measurements<A, C>(addr: A, conn: C, cnt: usize, quite: bool)
     where
         A: ToSocketAddrs,
         C: CacheConnector<Item = Contents>,
     {
         let mut tracker = online_tracker::OnlineTracker::new(addr, conn, quite).unwrap();
 
-        if let Err(e) = tracker.track() {
+        if let Err(e) = tracker.track(cnt) {
             if !quite {
                 println!("Online Tracker: {}", style(e).red());
             }
@@ -124,6 +138,6 @@ mod measurements {
                 "Online Tracker: {}",
                 style("MEASUREMENTS COMPLETED").green()
             );
-        }        
+        }
     }
 }

@@ -1,16 +1,17 @@
 use crate::connection::{Address, CacheConnector, MemoryConnector, Time};
+use std::alloc;
 use std::convert::TryInto;
 use std::io::Result;
-use std::cmp::max;
 
-#[derive(Default)]
 pub struct LocalMemoryConnector {
-    buf: Vec<Vec<u8>>,
+    buf: *mut u8,
 }
 
 impl LocalMemoryConnector {
     pub fn new() -> LocalMemoryConnector {
-        LocalMemoryConnector { buf: Vec::new() }
+        LocalMemoryConnector {
+            buf: std::ptr::null_mut(),
+        }
     }
 }
 
@@ -24,24 +25,26 @@ pub fn flush<T>(p: *const T) {
 impl MemoryConnector for LocalMemoryConnector {
     type Item = u8;
 
-    #[inline(always)]
     fn allocate(&mut self, size: usize) {
-        self.buf = vec![vec![1u8; 4096]; max(1, size >> 12)];
+        let layout = alloc::Layout::from_size_align(size, 4096).unwrap();
+
+        self.buf = unsafe { alloc::alloc(layout) };
     }
 
-    #[inline(always)]
+    // here inline(never) is used to fool prefetcher. Otherwise the buffer will get cached
+    // and the timing won't work
+    #[inline(never)]
     fn read(&self, ofs: usize) -> Result<Self::Item> {
-        Ok(self.buf[ofs >> 12][ofs & 0xfff])
+        Ok(unsafe { *self.buf.offset(ofs as isize) })
     }
 
-    #[inline(always)]
+    #[inline(never)]
     fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()> {
-        self.buf[ofs >> 12][ofs & 0xfff] = *what;
+        unsafe { *self.buf.offset(ofs as isize) = *what };
 
         Ok(())
     }
 
-    #[inline(always)]
     fn read_timed(&self, ofs: usize) -> Result<(Self::Item, Time)> {
         let now = std::time::Instant::now();
         let res = self.read(ofs)?;
@@ -53,7 +56,6 @@ impl MemoryConnector for LocalMemoryConnector {
         Ok((res, elapsed))
     }
 
-    #[inline(always)]
     fn write_timed(&mut self, ofs: usize, what: &Self::Item) -> Result<Time> {
         let now = std::time::Instant::now();
         self.write(ofs, what)?;
@@ -70,13 +72,11 @@ impl MemoryConnector for LocalMemoryConnector {
 impl CacheConnector for LocalMemoryConnector {
     type Item = u8;
 
-    #[inline(always)]
     fn cache(&mut self, addr: usize) -> Result<()> {
         self.read(addr)?;
         Ok(())
     }
 
-    #[inline(always)]
     fn time_access(&mut self, addr: Address) -> Result<Time> {
         let now = std::time::Instant::now();
         self.read(addr)?;
@@ -88,7 +88,6 @@ impl CacheConnector for LocalMemoryConnector {
         Ok(elapsed)
     }
 
-    #[inline(always)]
     fn reserve(&mut self, size: usize) {
         self.allocate(size)
     }

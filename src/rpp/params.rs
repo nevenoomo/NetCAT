@@ -1,5 +1,5 @@
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
-pub const ADDR_NUM: usize = 5000; // We take this number from the netcat article
+pub const ADDR_NUM: usize = 10000; // We take this number from the netcat article
 
 // TODO default params for Xeon E5, E7
 pub const BYTES_PER_LINE: usize = 64;

@@ -19,7 +19,7 @@ use std::io::{Error, ErrorKind};
 use timing_classif::{CacheTiming, TimingClassifier};
 
 pub const DELTA: usize = 30;
-pub const TIMINGS_INIT_FILL: usize = 1000;
+pub const TIMINGS_INIT_FILL: usize = 100;
 pub const TIMING_REFRESH_RATE: usize = 1000;
 pub const INSERT_RATE: usize = 100;
 
@@ -176,11 +176,11 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             .choose_multiple(&mut rng, TIMINGS_INIT_FILL)
         {
             // here we read from the main memory
-            let miss_time = self.conn.time_access(ofs).expect("Could not read in hist");
+            let miss_time = self.conn.time_access(ofs).expect("Failed to time memory access");
 
             // here we cache the address and read again from cache
-            self.conn.cache(ofs).expect("Could not write for hist");
-            let hit_time = self.conn.time_access(ofs).expect("Could not read in hist");
+            self.conn.cache(ofs).expect("Failed to cache addr in while training");
+            let hit_time = self.conn.time_access(ofs).expect("Failed to time cache access");
 
             // we expect the latency from main memory to be bigger that from LLC
             if hit_time > miss_time {
@@ -213,13 +213,16 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             );
             pb.set_prefix("Building sets:");
         }
-        while self.profiled() != self.params.n_sets {
+        while self.profiled() < self.params.n_sets {
             match self.build_set() {
                 Ok(set) => self.check_set(set),
                 Err(e) => {
                     if !self.quite {
                         println!("{}", style(e).red());
                     }
+                    // If case of error we retrain the classifier to ensure correct timings
+                    // MAYBE clean classifier before retraining
+                    self.train_classifier();
                 }
             }
             if !self.quite {
@@ -239,7 +242,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         }
     }
 
-    // note that this step might fail only due to read & write fails. read and write fail only as the last resort
+    // this step might fails only due to read & write fails. read and write fail only as the last resort
     fn build_set(&mut self) -> Result<EvictionSet> {
         let (mut s, x) = self.forward_selection()?;
         self.backward_selection(&mut s, x)?;
@@ -340,6 +343,9 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
         loop {
             let mut sub_set: EvictionSet = self.addrs.iter().take(n).copied().collect();
+            if n != sub_set.len() {
+                panic!("daflsk;fjdsla: {} {} {}", n, self.addrs.len(), self.profiled());
+            }
             // First, we write the whole buffer. Some addrs might get evicted by the consequent writes.
             // If this fails, then repeating won't help
             self.conn.cache_all(sub_set.iter().copied())?;
@@ -445,26 +451,26 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         // First we remove addr in set `S` from global addr pool
         self.addrs.retain(|x| !s.contains(x));
 
-        // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
-        // TODO this is an antipattern. Should avoid that
-        let addrs: HashSet<usize> = self.addrs.iter().copied().collect();
+        // // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
+        // // TODO this is an antipattern. Should avoid that
+        // let addrs: HashSet<usize> = self.addrs.iter().copied().collect();
 
-        for x in addrs.into_iter() {
-            // bring x into cache
-            self.conn.cache(x)?;
+        // for x in addrs.into_iter() {
+        //     // bring x into cache
+        //     self.conn.cache(x)?;
 
-            // potentially read x from the main memory
-            self.conn.cache_all(s.iter().copied())?;
-            let lat = self.conn.time_access(x)?;
+        //     // potentially read x from the main memory
+        //     self.conn.cache_all(s.iter().copied())?;
+        //     let lat = self.conn.time_access(x)?;
 
-            // If we really evicted `x`, then `lat` is a cache miss. Then we do not need `x` anymore
-            if self.classifier.is_miss(lat) {
-                self.classifier.record(CacheTiming::Miss(lat));
-                self.addrs.remove(&x);
-            } else {
-                self.classifier.record(CacheTiming::Hit(lat));
-            }
-        }
+        //     // If we really evicted `x`, then `lat` is a cache miss. Then we do not need `x` anymore
+        //     if self.classifier.is_miss(lat) {
+        //         self.classifier.record(CacheTiming::Miss(lat));
+        //         self.addrs.remove(&x);
+        //     } else {
+        //         self.classifier.record(CacheTiming::Hit(lat));
+        //     }
+        // }
 
         Ok(())
     }

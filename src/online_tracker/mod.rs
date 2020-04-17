@@ -23,7 +23,6 @@ use tracking::TrackingContext;
 pub type SavedLats = Vec<(Vec<ProbeResult<Latencies>>, SyncStatus, Time)>;
 
 const REPEATINGS: usize = 8;
-const MEASUREMENT_CNT: usize = 10000;
 const MAX_FAIL_CNT: usize = 100;
 
 pub struct OnlineTracker<C> {
@@ -47,11 +46,7 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
     ///
     /// Fails if port 9009 is used on the attacker machine or if the given
     /// address is unapropriet for connecting to.  
-    pub fn new<A: ToSocketAddrs>(
-        addr: A,
-        conn: C,
-        quite: bool,
-    ) -> Result<OnlineTracker<C>> {
+    pub fn new<A: ToSocketAddrs>(addr: A, conn: C, quite: bool) -> Result<OnlineTracker<C>> {
         let rpp = Rpp::new(conn, quite);
         let sock = UdpSocket::bind("0.0.0.0:9009")?;
         sock.connect(addr)?;
@@ -61,7 +56,7 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
             rpp,
             sock,
             pattern: Default::default(),
-            latencies: SavedLats::with_capacity(MEASUREMENT_CNT),
+            latencies: SavedLats::with_capacity(1000),
             quite,
         })
     }
@@ -83,7 +78,7 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
     /// - Cannot find the initial possition in RX buffer of the victim server
     ///
     // UGLY maybe there is some other way to handle retries?
-    pub fn track(&mut self) -> Result<()> {
+    pub fn track(&mut self, cnt: usize) -> Result<()> {
         use console::style;
         let mut err_cnt = 0;
         let quite = self.quite;
@@ -103,7 +98,7 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
         }
 
         err_cnt = 0;
-        while let Err(e) = self.measure() {
+        while let Err(e) = self.measure(cnt) {
             err_cnt += 1;
 
             if err_cnt > MAX_FAIL_CNT {
@@ -207,13 +202,12 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
         Ok(())
     }
 
-    fn measure(&mut self) -> Result<()> {
+    fn measure(&mut self, cnt: usize) -> Result<()> {
         let init_pos = self.get_init_pos()?;
         let mut ctx = TrackingContext::new(init_pos);
         let timer = Instant::now();
 
-        // TODO make the number of rounds non-constant
-        for _ in 0..MEASUREMENT_CNT {
+        for _ in 0..cnt {
             let mut probe_res;
             let es = self.pattern.window(ctx.pos()).copied().collect();
             self.rpp.prime_all(&es)?;
@@ -278,8 +272,8 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::pattern::Pattern;
+    use super::*;
 
     #[test]
     fn pattern_finding() {
