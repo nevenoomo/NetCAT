@@ -1,10 +1,30 @@
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
 pub const ADDR_NUM: usize = 10000; // We take this number from the netcat article
 
-// TODO default params for Xeon E5, E7
-pub const BYTES_PER_LINE: usize = 64;
-pub const LINES_PER_SET: usize = 12;
-pub const CACHE_SIZE: usize = 6_291_456; // 6 MiB
+pub static XEON_E5: CacheParams = CacheParams {
+    bytes_per_line: 64,
+    lines_per_set: 20,
+    cache_size: 20971520, // 20 MiB
+};
+
+pub static XEON_E5_DDIO: CacheParams = CacheParams {
+    bytes_per_line: 64,
+    lines_per_set: 2,
+    cache_size: 20971520, // 20 MiB
+};
+
+pub static CORE_I7: CacheParams = CacheParams {
+    bytes_per_line: 64,
+    lines_per_set: 12,
+    cache_size: 6_291_456, // 20 MiB
+};
+
+// This is for testing, i7 has no DDIO
+pub static CORE_I7_DDIO: CacheParams = CacheParams {
+    bytes_per_line: 64,
+    lines_per_set: 2,
+    cache_size: 6_291_456, // 20 MiB
+};
 
 /// Parameters for Remote PRIME+PROBE. 
 /// Describes the last level cache of the targeted prosessor
@@ -27,7 +47,7 @@ impl CacheParams {
 
 impl Default for CacheParams {
     fn default() -> Self {
-        Self::new(BYTES_PER_LINE, LINES_PER_SET, CACHE_SIZE)
+        CORE_I7
     }
 }
 

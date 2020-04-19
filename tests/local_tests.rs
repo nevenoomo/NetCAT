@@ -1,5 +1,3 @@
-#![feature(asm)]
-
 use rand::{self, Rng};
 use std::time::{SystemTime, Instant};
 

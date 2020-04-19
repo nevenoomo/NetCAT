@@ -51,7 +51,6 @@ pub trait CacheConnector {
     /// Caches a memory item at the given address
     fn cache(&mut self, addr: Address) -> Result<()>;
 
-    #[inline(always)]
     /// Caches all given addresses
     fn cache_all<I: Iterator<Item = Address>>(&mut self, mut addrs: I) -> Result<()> {
         addrs.try_for_each(|addr| self.cache(addr))

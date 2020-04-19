@@ -3,7 +3,7 @@
 //! The method is described in _NetCAT: Practical Cache Attacks from the Network_.
 #![allow(dead_code)]
 
-mod params;
+pub mod params;
 mod timing_classif;
 
 use crate::connection::{Address, CacheConnector, Time};
@@ -113,8 +113,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             color_keys: ColorKeys::with_capacity(params.n_colors),
             params,
             conn,
-            // TODO: do we really need ADDR_NUM here? We need at least as much page as there are colors. Maybe manipulate `params.n_colors`?
-            addrs: (0usize..ADDR_NUM).map(|x| x * PAGE_SIZE).collect(), // here we collect page aligned (e.i. at the begining of the page) adresses
+            addrs: (0usize..ADDR_NUM).map(|x| x * PAGE_SIZE).collect(), // here we collect page aligned (e.i. at the begining of the page) addresses
             classifier,
             quite,
         };
@@ -289,9 +288,9 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
         let color_code = possible_keys[0];
 
-        if !self.is_unique(color_code, &set)? {
-            return Ok(());
-        }
+        // if !self.is_unique(color_code, &set)? {
+        //     return Ok(());
+        // }
 
         // add our set to the corresponding key
         self.colored_sets[color_code].push(set);
@@ -346,9 +345,6 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             if n != sub_set.len() {
                 panic!("daflsk;fjdsla: {} {} {}", n, self.addrs.len(), self.profiled());
             }
-            // First, we write the whole buffer. Some addrs might get evicted by the consequent writes.
-            // If this fails, then repeating won't help
-            self.conn.cache_all(sub_set.iter().copied())?;
 
             // Walk over all the addrs of a selected subset and finding the address with the maximum latency
             let mut max_lat = 0;
@@ -451,26 +447,26 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         // First we remove addr in set `S` from global addr pool
         self.addrs.retain(|x| !s.contains(x));
 
-        // // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
-        // // TODO this is an antipattern. Should avoid that
-        // let addrs: HashSet<usize> = self.addrs.iter().copied().collect();
+        // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
+        // TODO this is an antipattern. Should avoid that
+        let addrs: HashSet<usize> = self.addrs.iter().copied().collect();
 
-        // for x in addrs.into_iter() {
-        //     // bring x into cache
-        //     self.conn.cache(x)?;
+        for x in addrs.into_iter() {
+            // bring x into cache
+            self.conn.cache(x)?;
 
-        //     // potentially read x from the main memory
-        //     self.conn.cache_all(s.iter().copied())?;
-        //     let lat = self.conn.time_access(x)?;
+            // potentially read x from the main memory
+            self.conn.cache_all(s.iter().copied())?;
+            let lat = self.conn.time_access(x)?;
 
-        //     // If we really evicted `x`, then `lat` is a cache miss. Then we do not need `x` anymore
-        //     if self.classifier.is_miss(lat) {
-        //         self.classifier.record(CacheTiming::Miss(lat));
-        //         self.addrs.remove(&x);
-        //     } else {
-        //         self.classifier.record(CacheTiming::Hit(lat));
-        //     }
-        // }
+            // If we really evicted `x`, then `lat` is a cache miss. Then we do not need `x` anymore
+            if self.classifier.is_miss(lat) {
+                self.classifier.record(CacheTiming::Miss(lat));
+                self.addrs.remove(&x);
+            } else {
+                self.classifier.record(CacheTiming::Hit(lat));
+            }
+        }
 
         Ok(())
     }

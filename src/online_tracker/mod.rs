@@ -7,6 +7,7 @@ mod tracking;
 
 use crate::connection::CacheConnector;
 pub use crate::connection::Time;
+pub use crate::rpp::params::CacheParams;
 pub use crate::rpp::{
     has_activation, ColorCode, ColoredSetCode, Contents, Latencies, ProbeResult, ProbeResult::*,
     Rpp, SetCode,
@@ -48,6 +49,27 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
     /// address is unapropriet for connecting to.  
     pub fn new<A: ToSocketAddrs>(addr: A, conn: C, quite: bool) -> Result<OnlineTracker<C>> {
         let rpp = Rpp::new(conn, quite);
+        let sock = UdpSocket::bind("0.0.0.0:9009")?;
+        sock.connect(addr)?;
+        sock.set_nonblocking(true)?;
+
+        Ok(OnlineTracker {
+            rpp,
+            sock,
+            pattern: Default::default(),
+            latencies: SavedLats::with_capacity(1000),
+            quite,
+        })
+    }
+
+    /// The same as new, but passes provided cache parameters to underlying RPP 
+    pub fn for_cache<A: ToSocketAddrs>(
+        addr: A,
+        conn: C,
+        quite: bool,
+        cparam: CacheParams,
+    ) -> Result<OnlineTracker<C>> {
+        let rpp = Rpp::with_params(conn, quite, cparam);
         let sock = UdpSocket::bind("0.0.0.0:9009")?;
         sock.connect(addr)?;
         sock.set_nonblocking(true)?;
