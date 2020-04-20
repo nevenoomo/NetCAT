@@ -4,7 +4,7 @@ use netcat::connection::MemoryConnector;
 const VAL: u8 = 123;
 
 fn main() {
-    let mut client = RdmaServerConnector::new("10.0.2.4:9003");
+    let mut client = RdmaServerConnector::new("10.0.2.4:9003").unwrap();
     println!("RDMA handshake successful!");
 
     println!();

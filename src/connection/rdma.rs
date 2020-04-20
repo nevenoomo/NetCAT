@@ -211,8 +211,8 @@ impl RdmaServerConnector {
     /// ## Panics
     /// Panics if there is no support for RDMA in the kernel, no RDMA devices where found,
     /// or if a device cannot be opened
-    pub fn new<A: net::ToSocketAddrs>(addr: A) -> RdmaServerConnector {
-        Self::setup_ib(addr).unwrap()
+    pub fn new<A: net::ToSocketAddrs>(addr: A) -> Result<RdmaServerConnector> {
+        Self::setup_ib(addr)
     }
 
     fn get_devs() -> Result<ibverbs::DeviceList> {
