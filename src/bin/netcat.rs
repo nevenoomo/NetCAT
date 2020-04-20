@@ -12,8 +12,7 @@ static CACHES: &[&str] = &["E5_DDIO", "E5", "I7", "custom"];
 fn main() {
     let matches = app_cli_config().get_matches();
 
-    if matches.is_present("interactive")
-    {
+    if matches.is_present("interactive") {
         interactive::run_session();
     } else {
         uninteractive::run_session(matches);
@@ -106,10 +105,13 @@ mod uninteractive {
     use get_if_addrs::get_if_addrs;
     use netcat::connection::CacheConnector;
     use netcat::connection::{local::LocalMemoryConnector, rdma::RdmaServerConnector};
-    use netcat::online_tracker;
+    use netcat::online_tracker::{LatsEntry, OnlineTracker};
+    use netcat::output::{file::JsonRecorder, Record};
     use netcat::rpp::params::CacheParams;
     use netcat::rpp::params::*;
     use netcat::rpp::Contents;
+    use std::fs::File;
+    use std::io::{stdout, BufWriter};
     use std::net::ToSocketAddrs;
     use std::process::exit;
 
@@ -117,6 +119,7 @@ mod uninteractive {
         let quite = args.is_present("quite");
         let port = value_t!(args.value_of("port"), u16).unwrap();
         let cnt = value_t!(args.value_of("measurements"), usize).unwrap();
+        let output = args.value_of("output");
 
         let cache_type = args.value_of("cache_description").unwrap();
 
@@ -149,7 +152,7 @@ mod uninteractive {
                 }
             };
 
-            do_measurements((ip, port), conn, cnt, quite, cparams);
+            do_measurements((ip, port), conn, cnt, quite, cparams, output);
         } else {
             // this is a local scenario
             // but we still need an address for synchronization
@@ -162,25 +165,55 @@ mod uninteractive {
                 .ip();
             let conn = LocalMemoryConnector::new();
 
-            do_measurements((ip, port), conn, cnt, quite, cparams);
+            do_measurements((ip, port), conn, cnt, quite, cparams, output);
         }
     }
 
-    fn do_measurements<A, C>(addr: A, conn: C, cnt: usize, quite: bool, cparams: CacheParams)
-    where
+    fn do_measurements<A, C>(
+        addr: A,
+        conn: C,
+        cnt: usize,
+        quite: bool,
+        cparams: CacheParams,
+        output: Option<&str>,
+    ) where
         A: ToSocketAddrs,
         C: CacheConnector<Item = Contents>,
     {
-        let mut tracker =
-            online_tracker::OnlineTracker::for_cache(addr, conn, quite, cparams).unwrap();
+        if let Some(file_name) = output {
+            // The user provided output location
+            let file = File::open(file_name).unwrap_or_else(|e| {
+                if !quite {
+                    panic!("Error while opening file: {}", style(e).red());
+                }
+                exit(1)
+            });
 
+            let output = JsonRecorder::new(BufWriter::new(file));
+            let tracker = OnlineTracker::for_cache(addr, conn, quite, output, cparams).unwrap();
+
+            run_tracker(tracker, cnt, quite);
+        } else {
+            // The user did not provide output, printing to stdout
+
+            let output = JsonRecorder::new(BufWriter::new(stdout()));
+            let tracker = OnlineTracker::for_cache(addr, conn, quite, output, cparams).unwrap();
+            run_tracker(tracker, cnt, quite);
+        }
+    }
+
+    fn run_tracker<C, R>(mut tracker: OnlineTracker<C, R>, cnt: usize, quite: bool)
+    where
+        C: CacheConnector<Item = Contents>,
+        R: Record<LatsEntry>,
+    {
         if let Err(e) = tracker.track(cnt) {
             if !quite {
-                println!("Online Tracker: {}", style(e).red());
+                eprintln!("Online Tracker: {}", style(e).red());
             }
         }
         if !quite {
-            println!(
+            eprintln!(
                 "Online Tracker: {}",
                 style("MEASUREMENTS COMPLETED").green()
             );
@@ -195,8 +228,11 @@ mod interactive {
     use netcat::connection::{
         local::LocalMemoryConnector, rdma::RdmaServerConnector, CacheConnector,
     };
-    use netcat::online_tracker::OnlineTracker;
+    use netcat::online_tracker::{LatsEntry, OnlineTracker};
+    use netcat::output::{file::JsonRecorder, Record};
     use netcat::rpp::{params::*, Contents};
+    use std::fs::File;
+    use std::io::{stdout, BufWriter};
     use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
     use std::str::FromStr;
 
@@ -315,15 +351,61 @@ mod interactive {
         A: ToSocketAddrs,
         C: CacheConnector<Item = Contents>,
     {
-        let mut tracker = OnlineTracker::for_cache(addr, conn, false, cparams).unwrap();
+        let file_name = get_filename();
+        if file_name.is_empty() {
+            eprintln!(
+                "No filename provided, printing to {}",
+                style("stdout").green()
+            );
+            let output = JsonRecorder::new(BufWriter::new(stdout()));
+            let tracker = OnlineTracker::for_cache(addr, conn, false, output, cparams).unwrap();
+
+            run_tracker(tracker);
+        } else {
+            let file = open_until_can(file_name);
+
+            let output = JsonRecorder::new(BufWriter::new(file));
+            let tracker = OnlineTracker::for_cache(addr, conn, false, output, cparams).unwrap();
+
+            run_tracker(tracker);
+        }
+    }
+
+    fn get_filename() -> String {
+        Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("File to save results to")
+            .default(String::new())
+            .interact()
+            .unwrap()
+    }
+
+    fn open_until_can(file_name: String) -> File {
+        let mut file_name = file_name;
+
+        loop {
+            match File::open(file_name) {
+                Ok(file) => return file,
+                Err(e) => {
+                    eprintln!("Error while opening the file: {}", style(e).red());
+                }
+            }
+            file_name = get_filename();
+        }
+    }
+
+    fn run_tracker<C, R>(mut tracker: OnlineTracker<C, R>)
+    where
+        C: CacheConnector<Item = Contents>,
+        R: Record<LatsEntry>,
+    {
         let mut not_done = true;
 
         while not_done {
             let cnt = get_cnt();
             if let Err(e) = tracker.track(cnt) {
-                println!("Online Tracker: {}", style(e).red());
+                eprintln!("Online Tracker: {}", style(e).red());
             }
-            println!(
+            eprintln!(
                 "Online Tracker: {}",
                 style("MEASUREMENTS COMPLETED").green()
             );

@@ -7,6 +7,7 @@ mod tracking;
 
 use crate::connection::CacheConnector;
 pub use crate::connection::Time;
+use crate::output::Record;
 pub use crate::rpp::params::CacheParams;
 pub use crate::rpp::{
     has_activation, ColorCode, ColoredSetCode, Contents, Latencies, ProbeResult, ProbeResult::*,
@@ -21,20 +22,25 @@ use std::time::Instant;
 pub use tracking::SyncStatus;
 use tracking::TrackingContext;
 
-pub type SavedLats = Vec<(Vec<ProbeResult<Latencies>>, SyncStatus, Time)>;
+pub type LatsEntry = (Vec<ProbeResult<Latencies>>, SyncStatus, Time);
+pub type SavedLats = Vec<LatsEntry>;
 
 const REPEATINGS: usize = 8;
 const MAX_FAIL_CNT: usize = 100;
 
-pub struct OnlineTracker<C> {
+pub struct OnlineTracker<C, R> {
     rpp: Rpp<C>,
+    output: R,
     sock: UdpSocket,
     pattern: Pattern,
-    latencies: SavedLats,
     quite: bool,
 }
 
-impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
+impl<C, R> OnlineTracker<C, R>
+where
+    C: CacheConnector<Item = Contents>,
+    R: Record<LatsEntry>,
+{
     /// Creates a new online tracker.
     ///
     /// # Arguements
@@ -42,12 +48,18 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
     /// - `addr` - Socket Address of the victim server (used for control packets, like synchronization of ring buffer possition)
     /// - `conn` - A memory connector, which will be used for communication with the server  
     /// - `quite` - Whether Online Tracker should report the progress
+    /// - `output` - An object recording results
     ///
     /// # Fails
     ///
     /// Fails if port 9009 is used on the attacker machine or if the given
     /// address is unapropriet for connecting to.  
-    pub fn new<A: ToSocketAddrs>(addr: A, conn: C, quite: bool) -> Result<OnlineTracker<C>> {
+    pub fn new<A: ToSocketAddrs>(
+        addr: A,
+        conn: C,
+        quite: bool,
+        output: R,
+    ) -> Result<OnlineTracker<C, R>> {
         let rpp = Rpp::new(conn, quite);
         let sock = UdpSocket::bind("0.0.0.0:9009")?;
         sock.connect(addr)?;
@@ -56,19 +68,20 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
         Ok(OnlineTracker {
             rpp,
             sock,
+            output,
             pattern: Default::default(),
-            latencies: SavedLats::with_capacity(1000),
             quite,
         })
     }
 
-    /// The same as new, but passes provided cache parameters to underlying RPP 
+    /// The same as new, but passes provided cache parameters to underlying RPP
     pub fn for_cache<A: ToSocketAddrs>(
         addr: A,
         conn: C,
         quite: bool,
+        output: R,
         cparam: CacheParams,
-    ) -> Result<OnlineTracker<C>> {
+    ) -> Result<OnlineTracker<C, R>> {
         let rpp = Rpp::with_params(conn, quite, cparam);
         let sock = UdpSocket::bind("0.0.0.0:9009")?;
         sock.connect(addr)?;
@@ -76,9 +89,9 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
 
         Ok(OnlineTracker {
             rpp,
+            output,
             sock,
             pattern: Default::default(),
-            latencies: SavedLats::with_capacity(1000),
             quite,
         })
     }
@@ -106,7 +119,7 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
         let quite = self.quite;
 
         if !quite {
-            println!("Online Tracker: {}", style("STARTED").green());
+            eprintln!("Online Tracker: {}", style("STARTED").green());
         }
         while let Err(e) = self.locate_rx() {
             err_cnt += 1;
@@ -115,8 +128,8 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
             }
         }
         if !quite {
-            println!("Online Tracker: {}", style("Located ring buffer").green());
-            println!("Online Tracker: {}", style("Starting measurements").green());
+            eprintln!("Online Tracker: {}", style("Located ring buffer").green());
+            eprintln!("Online Tracker: {}", style("Starting measurements").green());
         }
 
         err_cnt = 0;
@@ -129,7 +142,7 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
         }
 
         if !quite {
-            println!(
+            eprintln!(
                 "Online Tracker: {}",
                 style("MEASUREMENTS COMPLETED").green()
             );
@@ -273,7 +286,7 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
                 probe_res,
                 ctx.sync_status(),
                 timer.elapsed().as_nanos() as Time,
-            );
+            )?;
         }
 
         Ok(())
@@ -281,14 +294,8 @@ impl<C: CacheConnector<Item = Contents>> OnlineTracker<C> {
 
     #[inline(always)]
     // NOTE maybe we do not need to store all the information
-    fn save(&mut self, probes: Vec<ProbeResult<Latencies>>, stat: SyncStatus, timestamp: Time) {
-        self.latencies.push((probes, stat, timestamp))
-    }
-
-    /// Dumps all gathered info. Should be used only after the gathering routine. Otherwise will result in
-    /// an empty container
-    pub fn dump_raw(self) -> SavedLats {
-        self.latencies
+    fn save(&mut self, probes: Vec<ProbeResult<Latencies>>, stat: SyncStatus, timestamp: Time) -> Result<()> {
+        self.output.record((probes, stat, timestamp))
     }
 }
 

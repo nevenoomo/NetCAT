@@ -197,7 +197,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
     fn build_sets(&mut self) {
         if !self.quite {
-            println!("Building sets: {}", style("STARTED").green())
+            eprintln!("Building sets: {}", style("STARTED").green())
         }
         self.conn.reserve(self.params.v_buf);
         self.train_classifier();
@@ -217,7 +217,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
                 Ok(set) => self.check_set(set),
                 Err(e) => {
                     if !self.quite {
-                        println!("{}", style(e).red());
+                        eprintln!("{}", style(e).red());
                     }
                     // If case of error we retrain the classifier to ensure correct timings
                     // MAYBE clean classifier before retraining
@@ -231,13 +231,13 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
         if !self.quite {
             pb.finish_and_clear();
-            println!("Building sets: {}", style("FINISHED").green());
+            eprintln!("Building sets: {}", style("FINISHED").green());
         }
     }
 
     fn check_set(&mut self, set: EvictionSet) {
         if let Err(e) = self.add_sets(set) {
-            println!("{}", e);
+            eprintln!("{}", e);
         }
     }
 

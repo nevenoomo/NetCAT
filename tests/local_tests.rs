@@ -4,7 +4,7 @@ use std::time::{SystemTime, Instant};
 #[test]
 fn local_latency() {
     // By doing such a buffer we fool the prefetcher and can ditinguish hits and misses
-    let mut buf = vec![vec![0u8; 4096]; 8388608 / 4096];
+    let buf = vec![vec![0u8; 4096]; 8388608 / 4096];
     let mut rng = rand::thread_rng();
     let mut lats = Vec::new();
     let mut fail_cnt = 0;
@@ -16,22 +16,17 @@ fn local_latency() {
         let ofs_lo = (ofs as usize) & 0xfff;
 
         let sub_buf = &buf[ofs_hi];
-        // let buf_addr = buf[ofs_hi].as_mut_ptr();
 
         // Measure evicted x time
         let now = Instant::now();
         let _x1 = sub_buf[ofs_lo];
         let elapsed1 = now.elapsed().as_nanos();
 
-        // let elapsed1 = time_r(unsafe { buf_addr.offset(ofs & 0xfff) });
 
         // Measure in cache x time
         let now = Instant::now();
         let _x2 = sub_buf[ofs_lo];
         let elapsed2 = now.elapsed().as_nanos();
-
-
-        // let elapsed2 = time_r(unsafe { buf_addr.offset(ofs & 0xfff) });
 
         if elapsed1 <= elapsed2 {
             fail_cnt += 1;
