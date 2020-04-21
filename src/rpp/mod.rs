@@ -54,9 +54,10 @@ pub struct SetCode(pub ColorCode, pub ColoredSetCode);
 type SetsKey = BTreeSet<Address>;
 type EvictionSets = Vec<EvictionSet>;
 // a mapping from the color code to the eviction sets, corresponding to this color
+// when we find a new set, consisting of page aligned addresses starting at the beginning of the page
+// we get 64 more sets, which will be of the same color as we change only bits from 6 to 12, which are 
+// for page offset
 type ColoredSets = Vec<EvictionSets>;
-// a mapping from the color code to the page numbers (aka addr/4096) of this color
-type ColorKeys = Vec<SetsKey>;
 
 /// Probe results with wraped data
 // NOTE maybe downgrade to Option??
@@ -87,8 +88,7 @@ pub type Latencies = Vec<Time>;
 pub struct Rpp<C> {
     params: RppParams,
     conn: C,
-    colored_sets: ColoredSets, // maps a color code
-    color_keys: ColorKeys,
+    colored_sets: ColoredSets, // maps a color code to sets
     addrs: HashSet<Address>,
     classifier: TimingClassifier, // we will be using this to dynamically scale threshold
     quite: bool,
@@ -110,7 +110,6 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
         let mut rpp = Rpp {
             colored_sets: ColoredSets::with_capacity(params.n_colors),
-            color_keys: ColorKeys::with_capacity(params.n_colors),
             params,
             conn,
             addrs: (0usize..ADDR_NUM).map(|x| x * PAGE_SIZE).collect(), // here we collect page aligned (e.i. at the begining of the page) addresses
@@ -253,61 +252,44 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     fn add_sets(&mut self, set: EvictionSet) -> Result<()> {
         const CTL_BIT: usize = 6; // 6 - 12 (lower bits - lower val)
         const NUM_VARIANTS: usize = 64; // bits 12 - 6 determine the cache set. We have 2^6 = 64 options to change those
-        for i in 1..NUM_VARIANTS {
-            let new_set = set.iter().copied().map(|x| x ^ (i << CTL_BIT)).collect(); // xor all options with addrs from the given set
-            self.add_set(new_set)?;
-        }
-
-        self.add_set(set)
-    }
-
-    fn add_set(&mut self, set: EvictionSet) -> Result<()> {
-        let mut set_pages_nums = set.iter().map(|&x| x / PAGE_SIZE).collect();
-        let possible_keys: Vec<_> = self
-            .color_keys
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| !v.is_disjoint(&set_pages_nums))
-            .map(|(k, _)| k)
-            .collect();
-
-        // DEBUG: Page coloring may be not enabled for a given OS
-        // we expect only one color to be found, as a page can have only one color
-        if possible_keys.len() > 1 {
-            return Err(Error::new(
-                ErrorKind::InvalidData,
-                "ERROR: Cannot deside on set's color",
-            ));
-        }
-
-        if possible_keys.len() == 0 {
-            self.colored_sets.push(vec![set]);
-            self.color_keys.push(set_pages_nums);
+        
+        if !self.is_unique(&set, 0)? {
             return Ok(());
+        } 
+
+        // this vector corresponds to the new color which we have profiled
+        // one color corresponds to as much sets as there are on one page
+        // other sets for pages with the same color will not pass the uniqueness check 
+        let mut sets = Vec::with_capacity(self.params.n_sets_per_page);
+        sets.push(set.clone());
+        
+        for i in 1..NUM_VARIANTS {
+            // We construct 64 new sets given one
+            let new_set = set.iter().copied().map(|x| x ^ (i << CTL_BIT)).collect(); // xor all options with addrs from the given set
+            sets.push(new_set);
         }
 
-        let color_code = possible_keys[0];
-
-        // if !self.is_unique(color_code, &set)? {
-        //     return Ok(());
-        // }
-
-        // add our set to the corresponding key
-        self.colored_sets[color_code].push(set);
-
-        // union of the previous page nums and new page nums
-        self.color_keys[color_code].append(&mut set_pages_nums);
+        // Finally, we record a new color
+        self.colored_sets.push(sets);
 
         Ok(())
     }
 
-    fn is_unique(&mut self, color_code: ColorCode, set: &EvictionSet) -> Result<bool> {
+
+    /// Check whether a given set is unique
+    /// Will test it against all other sets with different colors
+    /// **and addresses with bits 6-12 equal to `idx`**. This is 
+    /// the nessessary condition for them to interfere with each other.
+    fn is_unique(&mut self, set: &EvictionSet, idx: usize) -> Result<bool> {
         use rand::seq::IteratorRandom;
 
         const REPEATING: usize = 5; // We will try for multiple times,
                                     // taking the most probable result
         let mut unique = true;
-        for other_set in self.colored_sets[color_code].iter() {
+
+        // We need to check sets from vector inside `colored_sets` vector with the 
+        // given `idx`
+        for other_set in self.colored_sets.iter().map(|v| &v[idx]) {
             let mut score = 0;
             for _ in 0..REPEATING {
                 // Taking a random addr from the other set
@@ -317,13 +299,15 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
                 self.conn.cache(test_addr)?;
 
                 // Now cache all addrs from the tested set
-                // this should cause eviction of the other set addr
+                // If the set is unique, then it will fill **another cache set** and not
+                // evict `test_addr`
                 self.conn.cache_all(set.iter().copied())?;
 
-                // We expect this to be a cache miss, as the `test_addr` got evicted
+                // We expect this to be a cache hit, as our new set is unique and 
+                // cover a **completely different** cache set
                 let lat = self.conn.time_access(test_addr)?;
 
-                if self.classifier.is_miss(lat) {
+                if self.classifier.is_hit(lat) {
                     score += 1;
                 } else {
                     score -= 1;
@@ -341,15 +325,19 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         let mut n = self.params.n_lines + 1;
 
         loop {
-            let mut sub_set: EvictionSet = self.addrs.iter().take(n).copied().collect();
-            if n != sub_set.len() {
-                panic!("daflsk;fjdsla: {} {} {}", n, self.addrs.len(), self.profiled());
-            }
-
-            // Walk over all the addrs of a selected subset and finding the address with the maximum latency
             let mut max_lat = 0;
             let mut max_addr = 0;
 
+            if n > self.addrs.len() {
+                // Here we excided the number of addrs, but registered no eviction
+                // We remove the faulty address not to cause more issues 
+                self.addrs.remove(&max_addr);
+                return Err(Error::new(ErrorKind::Other, "ERROR: cannot build set for the chosen address."));
+            }
+
+            let mut sub_set: EvictionSet = self.addrs.iter().take(n).copied().collect();
+
+            // Walk over all the addrs of a selected subset and finding the address with the maximum latency
             for &addr in sub_set.iter() {
                 let lat = self.conn.time_access(addr)?;
                 if lat > max_lat {
@@ -488,7 +476,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         self.colored_sets[color_code].len()
     }
 
-    /// Return an iterator over `SetCodes` for the given color
+    /// Return an iterator over `ColoredSetCodes` for the given color
     pub fn iter_color<'a>(
         &'a self,
         color_code: ColorCode,

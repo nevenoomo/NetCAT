@@ -373,8 +373,9 @@ mod interactive {
 
     fn get_filename() -> String {
         Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("File to save results to")
+            .with_prompt("File to save results to [stdout]")
             .default(String::new())
+            .show_default(false)
             .interact()
             .unwrap()
     }
