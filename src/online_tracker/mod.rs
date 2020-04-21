@@ -17,7 +17,7 @@ use pattern::{Pattern, PatternIdx, PossiblePatterns};
 use std::collections::HashMap;
 use std::io::Result;
 use std::io::{Error, ErrorKind};
-use std::net::{ToSocketAddrs, UdpSocket};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::Instant;
 pub use tracking::SyncStatus;
 use tracking::TrackingContext;
@@ -32,6 +32,7 @@ pub struct OnlineTracker<C, R> {
     rpp: Rpp<C>,
     output: R,
     sock: UdpSocket,
+    sock_addr: SocketAddr,
     pattern: Pattern,
     quite: bool,
 }
@@ -61,14 +62,34 @@ where
         output: R,
     ) -> Result<OnlineTracker<C, R>> {
         let rpp = Rpp::new(conn, quite);
-        let sock = UdpSocket::bind("0.0.0.0:9009")?;
-        sock.connect(addr)?;
-        sock.set_nonblocking(true)?;
+
+        // Allow the machine to automatically choose port for us
+        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| {
+            Error::new(
+                ErrorKind::AddrNotAvailable,
+                format!("ERROR: could not bind to address: {}", e),
+            )
+        })?;
+
+        // We do it this way and not by `connection` method be able to send to 
+        // closed ports (with connection we would get ICMP back and fail next time)
+        let sock_addr = addr.to_socket_addrs()?.next().ok_or(Error::new(
+            ErrorKind::InvalidData,
+            "ERROR: could not resolve address.",
+        ))?;
+
+        sock.set_nonblocking(true).map_err(|e| {
+            Error::new(
+                ErrorKind::ConnectionRefused,
+                format!("ERROR: Could not set non blocking: {}", e),
+            )
+        })?;
 
         Ok(OnlineTracker {
             rpp,
             sock,
             output,
+            sock_addr,
             pattern: Default::default(),
             quite,
         })
@@ -83,13 +104,33 @@ where
         cparam: CacheParams,
     ) -> Result<OnlineTracker<C, R>> {
         let rpp = Rpp::with_params(conn, quite, cparam);
-        let sock = UdpSocket::bind("0.0.0.0:9009")?;
-        sock.connect(addr)?;
-        sock.set_nonblocking(true)?;
+
+        // Allow the machine to automatically choose port for us
+        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| {
+            Error::new(
+                ErrorKind::AddrNotAvailable,
+                format!("ERROR: could not bind to address: {}", e),
+            )
+        })?;
+
+        // We do it this way and not by `connection` method be able to send to 
+        // closed ports (with connection we would get ICMP back and fail next time)
+        let sock_addr = addr.to_socket_addrs()?.next().ok_or(Error::new(
+            ErrorKind::InvalidData,
+            "ERROR: could not resolve address.",
+        ))?;
+
+        sock.set_nonblocking(true).map_err(|e| {
+            Error::new(
+                ErrorKind::ConnectionRefused,
+                format!("ERROR: Could not set non blocking: {}", e),
+            )
+        })?;
 
         Ok(OnlineTracker {
             rpp,
             output,
+            sock_addr,
             sock,
             pattern: Default::default(),
             quite,
@@ -124,7 +165,10 @@ where
         while let Err(e) = self.locate_rx() {
             err_cnt += 1;
             if err_cnt > MAX_FAIL_CNT {
-                return Err(e);
+                return Err(Error::new(
+                    ErrorKind::NotConnected,
+                    format!("ERROR: Could not loacte RX buffer in memory: {}", e),
+                ));
             }
         }
         if !quite {
@@ -183,6 +227,7 @@ where
                 for &colored_set_code in set_codes.iter() {
                     let set_code = SetCode(color_code, colored_set_code);
                     self.rpp.prime(&set_code)?;
+                    // DEBUG this causes connection refused error
                     self.send_packet()?;
                     self.send_packet()?;
                     if self.rpp.probe(&set_code)?.is_activated() {
@@ -233,7 +278,7 @@ where
 
     #[inline(always)]
     fn send_packet(&self) -> Result<()> {
-        self.sock.send(&[0])?;
+        self.sock.send_to(&[0], self.sock_addr)?;
         Ok(())
     }
 
@@ -294,7 +339,12 @@ where
 
     #[inline(always)]
     // NOTE maybe we do not need to store all the information
-    fn save(&mut self, probes: Vec<ProbeResult<Latencies>>, stat: SyncStatus, timestamp: Time) -> Result<()> {
+    fn save(
+        &mut self,
+        probes: Vec<ProbeResult<Latencies>>,
+        stat: SyncStatus,
+        timestamp: Time,
+    ) -> Result<()> {
         self.output.record((probes, stat, timestamp))
     }
 }
