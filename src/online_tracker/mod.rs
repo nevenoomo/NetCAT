@@ -78,12 +78,12 @@ where
             "ERROR: could not resolve address.",
         ))?;
 
-        sock.set_nonblocking(true).map_err(|e| {
-            Error::new(
-                ErrorKind::ConnectionRefused,
-                format!("ERROR: Could not set non blocking: {}", e),
-            )
-        })?;
+        // sock.set_nonblocking(true).map_err(|e| {
+        //     Error::new(
+        //         ErrorKind::ConnectionRefused,
+        //         format!("ERROR: Could not set non blocking: {}", e),
+        //     )
+        // })?;
 
         Ok(OnlineTracker {
             rpp,
@@ -93,6 +93,10 @@ where
             pattern: Default::default(),
             quite,
         })
+    }
+
+    pub fn set_broadcast(&mut self, val: bool) -> Result<()> {
+        self.sock.set_broadcast(val)
     }
 
     /// The same as new, but passes provided cache parameters to underlying RPP
@@ -120,12 +124,12 @@ where
             "ERROR: could not resolve address.",
         ))?;
 
-        sock.set_nonblocking(true).map_err(|e| {
-            Error::new(
-                ErrorKind::ConnectionRefused,
-                format!("ERROR: Could not set non blocking: {}", e),
-            )
-        })?;
+        // sock.set_nonblocking(true).map_err(|e| {
+        //     Error::new(
+        //         ErrorKind::ConnectionRefused,
+        //         format!("ERROR: Could not set non blocking: {}", e),
+        //     )
+        // })?;
 
         Ok(OnlineTracker {
             rpp,

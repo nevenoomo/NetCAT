@@ -3,7 +3,7 @@ use std::net::IpAddr;
 use std::str::FromStr;
 
 const DEFAULT_PORT: &str = "9003";
-const DEFAULT_MEASUREMENT_CNT: &str = "10000";
+const DEFAULT_MEASUREMENT_CNT: &str = "1000";
 const DEFAULT_CACHE: &str = "E5_DDIO";
 
 static CONN_TYPES: &[&str] = &["rdma", "local"];
@@ -41,7 +41,7 @@ fn app_cli_config<'a, 'b>() -> App<'a, 'b> {
                 .short("a")
                 .takes_value(true)
                 .value_name("IP_ADDR")
-                .required_if("connection", "rdma")
+                .required(true)
                 .default_value_if("interactive", None, "127.0.0.1")
                 .validator(|x| match IpAddr::from_str(x.as_str()) {
                     Ok(_) => Ok(()),
@@ -102,7 +102,6 @@ fn app_cli_config<'a, 'b>() -> App<'a, 'b> {
 mod uninteractive {
     use clap::{value_t, ArgMatches};
     use console::style;
-    use get_if_addrs::get_if_addrs;
     use netcat::connection::CacheConnector;
     use netcat::connection::{local::LocalMemoryConnector, rdma::RdmaServerConnector};
     use netcat::online_tracker::{LatsEntry, OnlineTracker};
@@ -137,10 +136,11 @@ mod uninteractive {
             _ => panic!("Unsupported value"),
         };
 
+        let ip = args.value_of("address").unwrap();
+
         // Unwraping is ok as we have a default value
         if args.value_of("connection").unwrap() == "rdma" {
             // these are required for rdma and validated
-            let ip = args.value_of("address").unwrap();
             let conn = match RdmaServerConnector::new((ip, port)) {
                 Ok(c) => c,
                 Err(e) => {
@@ -152,20 +152,11 @@ mod uninteractive {
                 }
             };
 
-            do_measurements((ip, port), conn, cnt, quite, cparams, output);
+            do_measurements((ip, port), conn, cnt, quite, cparams, output, false);
         } else {
-            // this is a local scenario
-            // but we still need an address for synchronization
-            let ip = get_if_addrs()
-                .expect("ERROR: Could not get machine network interfaces")
-                .into_iter()
-                .filter(|i| !i.is_loopback())
-                .next()
-                .expect("ERROR: no network interface found")
-                .ip();
             let conn = LocalMemoryConnector::new();
 
-            do_measurements((ip, port), conn, cnt, quite, cparams, output);
+            do_measurements((ip, port), conn, cnt, quite, cparams, output, true);
         }
     }
 
@@ -176,13 +167,14 @@ mod uninteractive {
         quite: bool,
         cparams: CacheParams,
         output: Option<&str>,
+        broadcast: bool,
     ) where
         A: ToSocketAddrs,
         C: CacheConnector<Item = Contents>,
     {
         if let Some(file_name) = output {
             // The user provided output location
-            let file = File::open(file_name).unwrap_or_else(|e| {
+            let file = File::create(file_name).unwrap_or_else(|e| {
                 if !quite {
                     panic!("Error while opening file: {}", style(e).red());
                 }
@@ -192,21 +184,25 @@ mod uninteractive {
             let output = JsonRecorder::new(BufWriter::new(file));
             let tracker = OnlineTracker::for_cache(addr, conn, quite, output, cparams).unwrap();
 
-            run_tracker(tracker, cnt, quite);
+            run_tracker(tracker, cnt, quite, broadcast);
         } else {
             // The user did not provide output, printing to stdout
 
             let output = JsonRecorder::new(BufWriter::new(stdout()));
             let tracker = OnlineTracker::for_cache(addr, conn, quite, output, cparams).unwrap();
-            run_tracker(tracker, cnt, quite);
+            
+            run_tracker(tracker, cnt, quite, broadcast);
         }
     }
 
-    fn run_tracker<C, R>(mut tracker: OnlineTracker<C, R>, cnt: usize, quite: bool)
+    fn run_tracker<C, R>(mut tracker: OnlineTracker<C, R>, cnt: usize, quite: bool, broadcast: bool)
     where
         C: CacheConnector<Item = Contents>,
         R: Record<LatsEntry>,
     {
+        if broadcast {
+            tracker.set_broadcast(true).expect("Could not set to broadcast");
+        }
         if let Err(e) = tracker.track(cnt) {
             if !quite {
                 eprintln!("Online Tracker: {}", style(e).red());
@@ -224,7 +220,6 @@ mod uninteractive {
 mod interactive {
     use console::style;
     use dialoguer::{theme::ColorfulTheme, Confirmation, Input, Select};
-    use get_if_addrs::get_if_addrs;
     use netcat::connection::{
         local::LocalMemoryConnector, rdma::RdmaServerConnector, CacheConnector,
     };
@@ -244,11 +239,7 @@ mod interactive {
             .interact()
             .unwrap();
 
-        let sock_addr = if super::CONN_TYPES[conn_selection] == "rdma" {
-            get_remote_addr()
-        } else {
-            get_local_addr()
-        };
+        let sock_addr = get_addr();
 
         let cache_type = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("Choose cache")
@@ -270,15 +261,15 @@ mod interactive {
                 Ok(c) => c,
                 Err(e) => panic!("{}", style(e).red()),
             };
-            do_measurements(sock_addr, conn, cparams);
+            do_measurements(sock_addr, conn, cparams, false);
         } else {
             let conn = LocalMemoryConnector::new();
-            do_measurements(sock_addr, conn, cparams);
+            do_measurements(sock_addr, conn, cparams, true);
         }
     }
     fn get_ip() -> IpAddr {
         Input::with_theme(&ColorfulTheme::default())
-            .with_prompt("Enter IP of the server")
+            .with_prompt("Enter IP of the server (should be broadcast for local attack)")
             .validate_with(|x: &str| match IpAddr::from_str(x) {
                 Ok(_) => Ok(()),
                 Err(_) => Err(String::from("Faulty IP adress")),
@@ -300,19 +291,8 @@ mod interactive {
             .unwrap()
     }
 
-    fn get_remote_addr() -> SocketAddr {
+    fn get_addr() -> SocketAddr {
         (get_ip(), get_port()).into()
-    }
-
-    fn get_local_addr() -> SocketAddr {
-        let ip = get_if_addrs()
-            .expect("ERROR: Could not get machine network interfaces")
-            .into_iter()
-            .filter(|i| !i.is_loopback())
-            .next()
-            .expect("ERROR: no network interface found")
-            .ip();
-        (ip, get_port()).into()
     }
 
     fn get_custom_cache() -> CacheParams {
@@ -346,7 +326,7 @@ mod interactive {
         CacheParams::new(bytes_per_line, lines_per_set, cache_size)
     }
 
-    fn do_measurements<A, C>(addr: A, conn: C, cparams: CacheParams)
+    fn do_measurements<A, C>(addr: A, conn: C, cparams: CacheParams, broadcast: bool)
     where
         A: ToSocketAddrs,
         C: CacheConnector<Item = Contents>,
@@ -360,14 +340,14 @@ mod interactive {
             let output = JsonRecorder::new(BufWriter::new(stdout()));
             let tracker = OnlineTracker::for_cache(addr, conn, false, output, cparams).unwrap();
 
-            run_tracker(tracker);
+            run_tracker(tracker, broadcast);
         } else {
             let file = open_until_can(file_name);
 
             let output = JsonRecorder::new(BufWriter::new(file));
             let tracker = OnlineTracker::for_cache(addr, conn, false, output, cparams).unwrap();
 
-            run_tracker(tracker);
+            run_tracker(tracker, broadcast);
         }
     }
 
@@ -384,7 +364,7 @@ mod interactive {
         let mut file_name = file_name;
 
         loop {
-            match File::open(file_name) {
+            match File::create(file_name) {
                 Ok(file) => return file,
                 Err(e) => {
                     eprintln!("Error while opening the file: {}", style(e).red());
@@ -394,12 +374,16 @@ mod interactive {
         }
     }
 
-    fn run_tracker<C, R>(mut tracker: OnlineTracker<C, R>)
+    fn run_tracker<C, R>(mut tracker: OnlineTracker<C, R>, broadcast: bool)
     where
         C: CacheConnector<Item = Contents>,
         R: Record<LatsEntry>,
     {
         let mut not_done = true;
+
+        if broadcast {
+            tracker.set_broadcast(true).expect("Could not set broadcast");
+        }
 
         while not_done {
             let cnt = get_cnt();
