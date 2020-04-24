@@ -5,8 +5,8 @@
 mod pattern;
 mod tracking;
 
-use crate::connection::CacheConnector;
 pub use crate::connection::Time;
+use crate::connection::{CacheConnector, PacketSender};
 use crate::output::Record;
 pub use crate::rpp::params::CacheParams;
 pub use crate::rpp::{
@@ -17,7 +17,6 @@ use pattern::{Pattern, PatternIdx, PossiblePatterns};
 use std::collections::HashMap;
 use std::io::Result;
 use std::io::{Error, ErrorKind};
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 use std::time::Instant;
 pub use tracking::SyncStatus;
 use tracking::TrackingContext;
@@ -28,119 +27,114 @@ pub type SavedLats = Vec<LatsEntry>;
 const REPEATINGS: usize = 8;
 const MAX_FAIL_CNT: usize = 100;
 
-pub struct OnlineTracker<C, R> {
+/// Builds and sets up `OnlineTracker`
+pub struct OnlineTrackerBuilder<C, R, S> {
+    conn: Option<C>,
+    output: Option<R>,
+    sender: Option<S>,
+    cparam: Option<CacheParams>,
+    quite: bool,
+}
+
+impl<C, R, S> Default for OnlineTrackerBuilder<C, R, S> {
+    fn default() -> Self {
+        OnlineTrackerBuilder {
+            conn: None,
+            output: None,
+            sender: None,
+            cparam: None,
+            quite: false,
+        }
+    }
+}
+
+impl<C, R, S> OnlineTrackerBuilder<C, R, S> {
+    /// Returns new, uninitialized builder
+    pub fn new() -> OnlineTrackerBuilder<C, R, S> {
+        Default::default()
+    }
+}
+
+impl<C, R, S> OnlineTrackerBuilder<C, R, S>
+where
+    C: CacheConnector<Item = Contents>,
+    R: Record<LatsEntry>,
+    S: PacketSender,
+{
+    /// Sets connector for the future `OnlineTracker`
+    pub fn set_conn(&mut self, conn: C) {
+        self.conn = Some(conn);
+    }
+
+    /// Sets output to be used in the future `OnlineTracker`
+    pub fn set_output(&mut self, output: R) {
+        self.output = Some(output);
+    }
+
+    /// Sets packet sender to be used in the future `OnlineTracker`
+    pub fn set_sender(&mut self, sender: S) {
+        self.sender = Some(sender);
+    }
+
+    /// Sets the verbosity of the future `OnlineTracker`
+    pub fn set_quite(&mut self, quite: bool) {
+        self.quite = quite;
+    }
+
+    /// Sets cache parameters of the victim
+    pub fn set_cache(&mut self, cparam: CacheParams) {
+        self.cparam = Some(cparam);
+    }
+
+    /// Finalizes the construction. Fails if `conn`, `output`, or `sender` not set.
+    pub fn finalize(self) -> Result<OnlineTracker<C, R, S>> {
+        let conn = self.conn.ok_or(Error::new(
+            ErrorKind::InvalidData,
+            "ERROR: connector is not set",
+        ))?;
+
+        let output = self.output.ok_or(Error::new(
+            ErrorKind::InvalidData,
+            "ERROR: output is not set",
+        ))?;
+
+        let sender = self.sender.ok_or(Error::new(
+            ErrorKind::InvalidData,
+            "ERROR: packet sender is not set",
+        ))?;
+
+        let cparam = self.cparam.unwrap_or_default();
+
+        let quite = self.quite;
+
+        let rpp = Rpp::with_params(conn, quite, cparam);
+
+        Ok(OnlineTracker{
+            rpp,
+            output,
+            sender,
+            pattern: Default::default(),
+            quite
+        })
+    }
+}
+
+/// The main tracking component. Observes cache activity and records
+/// victim's interations.
+pub struct OnlineTracker<C, R, S> {
     rpp: Rpp<C>,
     output: R,
-    sock: UdpSocket,
-    sock_addr: SocketAddr,
+    sender: S,
     pattern: Pattern,
     quite: bool,
 }
 
-impl<C, R> OnlineTracker<C, R>
+impl<C, R, S> OnlineTracker<C, R, S>
 where
     C: CacheConnector<Item = Contents>,
     R: Record<LatsEntry>,
+    S: PacketSender,
 {
-    /// Creates a new online tracker.
-    ///
-    /// # Arguements
-    ///
-    /// - `addr` - Socket Address of the victim server (used for control packets, like synchronization of ring buffer possition)
-    /// - `conn` - A memory connector, which will be used for communication with the server  
-    /// - `quite` - Whether Online Tracker should report the progress
-    /// - `output` - An object recording results
-    ///
-    /// # Fails
-    ///
-    /// Fails if port 9009 is used on the attacker machine or if the given
-    /// address is unapropriet for connecting to.  
-    pub fn new<A: ToSocketAddrs>(
-        addr: A,
-        conn: C,
-        quite: bool,
-        output: R,
-    ) -> Result<OnlineTracker<C, R>> {
-        let rpp = Rpp::new(conn, quite);
-
-        // Allow the machine to automatically choose port for us
-        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| {
-            Error::new(
-                ErrorKind::AddrNotAvailable,
-                format!("ERROR: could not bind to address: {}", e),
-            )
-        })?;
-
-        // We do it this way and not by `connection` method be able to send to 
-        // closed ports (with connection we would get ICMP back and fail next time)
-        let sock_addr = addr.to_socket_addrs()?.next().ok_or(Error::new(
-            ErrorKind::InvalidData,
-            "ERROR: could not resolve address.",
-        ))?;
-
-        // sock.set_nonblocking(true).map_err(|e| {
-        //     Error::new(
-        //         ErrorKind::ConnectionRefused,
-        //         format!("ERROR: Could not set non blocking: {}", e),
-        //     )
-        // })?;
-
-        Ok(OnlineTracker {
-            rpp,
-            sock,
-            output,
-            sock_addr,
-            pattern: Default::default(),
-            quite,
-        })
-    }
-
-    pub fn set_broadcast(&mut self, val: bool) -> Result<()> {
-        self.sock.set_broadcast(val)
-    }
-
-    /// The same as new, but passes provided cache parameters to underlying RPP
-    pub fn for_cache<A: ToSocketAddrs>(
-        addr: A,
-        conn: C,
-        quite: bool,
-        output: R,
-        cparam: CacheParams,
-    ) -> Result<OnlineTracker<C, R>> {
-        let rpp = Rpp::with_params(conn, quite, cparam);
-
-        // Allow the machine to automatically choose port for us
-        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| {
-            Error::new(
-                ErrorKind::AddrNotAvailable,
-                format!("ERROR: could not bind to address: {}", e),
-            )
-        })?;
-
-        // We do it this way and not by `connection` method be able to send to 
-        // closed ports (with connection we would get ICMP back and fail next time)
-        let sock_addr = addr.to_socket_addrs()?.next().ok_or(Error::new(
-            ErrorKind::InvalidData,
-            "ERROR: could not resolve address.",
-        ))?;
-
-        // sock.set_nonblocking(true).map_err(|e| {
-        //     Error::new(
-        //         ErrorKind::ConnectionRefused,
-        //         format!("ERROR: Could not set non blocking: {}", e),
-        //     )
-        // })?;
-
-        Ok(OnlineTracker {
-            rpp,
-            output,
-            sock_addr,
-            sock,
-            pattern: Default::default(),
-            quite,
-        })
-    }
-
     /// Sets the verbosity of the Online Tracker instance
     pub fn set_quite(&mut self, quite: bool) {
         self.quite = quite;
@@ -232,8 +226,8 @@ where
                     let set_code = SetCode(color_code, colored_set_code);
                     self.rpp.prime(&set_code)?;
                     // DEBUG this causes connection refused error
-                    self.send_packet()?;
-                    self.send_packet()?;
+                    self.sender.send_packet()?;
+                    self.sender.send_packet()?;
                     if self.rpp.probe(&set_code)?.is_activated() {
                         pattern.push(Some(set_code.1));
                     } else {
@@ -264,7 +258,7 @@ where
                 err_cnt += 1;
                 continue;
             }
-            if self.send_packet().is_err() {
+            if self.sender.send_packet().is_err() {
                 err_cnt += 1;
                 continue;
             }
@@ -278,12 +272,6 @@ where
         // Then we return the next one, as we expect it to be filled next.
         // Therefore, it corresponds to the starting pointer of ring buffer.
         Ok(1)
-    }
-
-    #[inline(always)]
-    fn send_packet(&self) -> Result<()> {
-        self.sock.send_to(&[0], self.sock_addr)?;
-        Ok(())
     }
 
     fn measure(&mut self, cnt: usize) -> Result<()> {
@@ -302,7 +290,7 @@ where
                 // we need to send our own packet to the server and then
                 // see if it activates the expected cache set.
                 if ctx.should_inject() {
-                    self.send_packet()?;
+                    self.sender.send_packet()?;
                     ctx.inject();
                 }
                 // MAYBE make a newtype for probe_results
