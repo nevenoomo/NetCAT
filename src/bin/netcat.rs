@@ -436,9 +436,10 @@ mod interactive {
         while not_init {
             if let Err(e) = tracker.init() {
                 eprintln!("Online Tracker: {}", style(e).red());
+                not_init = should_continue();
+            } else {
+                not_init = false;
             }
-
-            not_init = should_continue();
         }
 
         let mut not_done = true;
