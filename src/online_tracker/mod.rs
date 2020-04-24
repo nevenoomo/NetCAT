@@ -62,28 +62,33 @@ where
     S: PacketSender,
 {
     /// Sets connector for the future `OnlineTracker`
-    pub fn set_conn(&mut self, conn: C) {
+    pub fn set_conn(mut self, conn: C) -> Self {
         self.conn = Some(conn);
+        self
     }
 
     /// Sets output to be used in the future `OnlineTracker`
-    pub fn set_output(&mut self, output: R) {
+    pub fn set_output(mut self, output: R) -> Self {
         self.output = Some(output);
+        self
     }
 
     /// Sets packet sender to be used in the future `OnlineTracker`
-    pub fn set_sender(&mut self, sender: S) {
+    pub fn set_sender(mut self, sender: S) -> Self {
         self.sender = Some(sender);
+        self
     }
 
     /// Sets the verbosity of the future `OnlineTracker`
-    pub fn set_quite(&mut self, quite: bool) {
+    pub fn set_quite(mut self, quite: bool) -> Self {
         self.quite = quite;
+        self
     }
 
     /// Sets cache parameters of the victim
-    pub fn set_cache(&mut self, cparam: CacheParams) {
+    pub fn set_cache(mut self, cparam: CacheParams) -> Self {
         self.cparam = Some(cparam);
+        self
     }
 
     /// Finalizes the construction. Fails if `conn`, `output`, or `sender` not set.
