@@ -102,16 +102,16 @@ fn app_cli_config<'a, 'b>() -> App<'a, 'b> {
 mod uninteractive {
     use clap::{value_t, ArgMatches};
     use console::style;
-    use netcat::connection::CacheConnector;
-    use netcat::connection::{local::LocalMemoryConnector, rdma::RdmaServerConnector};
-    use netcat::online_tracker::{LatsEntry, OnlineTracker};
+    use netcat::connection::local::{LocalMemoryConnector, LocalPacketSender};
+    use netcat::connection::rdma::{RdmaServerConnector, RemotePacketSender};
+    use netcat::connection::{CacheConnector, PacketSender};
+    use netcat::online_tracker::{LatsEntry, OnlineTracker, OnlineTrackerBuilder};
     use netcat::output::{file::JsonRecorder, Record};
     use netcat::rpp::params::CacheParams;
     use netcat::rpp::params::*;
     use netcat::rpp::Contents;
     use std::fs::File;
     use std::io::{stdout, BufWriter};
-    use std::net::ToSocketAddrs;
     use std::process::exit;
 
     pub fn run_session(args: ArgMatches) {
@@ -140,36 +140,45 @@ mod uninteractive {
 
         // Unwraping is ok as we have a default value
         if args.value_of("connection").unwrap() == "rdma" {
-            // these are required for rdma and validated
-            let conn = match RdmaServerConnector::new((ip, port)) {
-                Ok(c) => c,
-                Err(e) => {
-                    if !quite {
-                        panic!("{}", style(e).red())
-                    } else {
-                        exit(1)
-                    }
+            let sender = RemotePacketSender::new((ip, port)).unwrap_or_else(|e| {
+                if !quite {
+                    panic!("{}", style(e).red());
                 }
-            };
+                exit(1);
+            });
 
-            do_measurements((ip, port), conn, cnt, quite, cparams, output, false);
+            // these are required for rdma and validated
+            let conn = RdmaServerConnector::new((ip, port)).unwrap_or_else(|e| {
+                if !quite {
+                    panic!("{}", style(e).red());
+                }
+                exit(1);
+            });
+
+            do_measurements(sender, conn, cnt, quite, cparams, output);
         } else {
+            let sender = LocalPacketSender::new((ip, port)).unwrap_or_else(|e| {
+                if !quite {
+                    panic!("{}", style(e).red());
+                }
+                exit(1);
+            });
+
             let conn = LocalMemoryConnector::new();
 
-            do_measurements((ip, port), conn, cnt, quite, cparams, output, true);
+            do_measurements(sender, conn, cnt, quite, cparams, output);
         }
     }
 
-    fn do_measurements<A, C>(
-        addr: A,
+    fn do_measurements<S, C>(
+        sender: S,
         conn: C,
         cnt: usize,
         quite: bool,
         cparams: CacheParams,
         output: Option<&str>,
-        broadcast: bool,
     ) where
-        A: ToSocketAddrs,
+        S: PacketSender,
         C: CacheConnector<Item = Contents>,
     {
         if let Some(file_name) = output {
@@ -182,27 +191,49 @@ mod uninteractive {
             });
 
             let output = JsonRecorder::new(BufWriter::new(file));
-            let tracker = OnlineTracker::for_cache(addr, conn, quite, output, cparams).unwrap();
+            let tracker = OnlineTrackerBuilder::new()
+                .set_conn(conn)
+                .set_sender(sender)
+                .set_quite(quite)
+                .set_cache(cparams)
+                .set_output(output)
+                .finalize()
+                .unwrap_or_else(|e| {
+                    if !quite {
+                        panic!("{}", style(e).red());
+                    }
+                    exit(1);
+                });
 
-            run_tracker(tracker, cnt, quite, broadcast);
+            run_tracker(tracker, cnt, quite);
         } else {
             // The user did not provide output, printing to stdout
-
             let output = JsonRecorder::new(BufWriter::new(stdout()));
-            let tracker = OnlineTracker::for_cache(addr, conn, quite, output, cparams).unwrap();
-            
-            run_tracker(tracker, cnt, quite, broadcast);
+
+            let tracker = OnlineTrackerBuilder::new()
+                .set_conn(conn)
+                .set_sender(sender)
+                .set_quite(quite)
+                .set_cache(cparams)
+                .set_output(output)
+                .finalize()
+                .unwrap_or_else(|e| {
+                    if !quite {
+                        panic!("{}", style(e).red());
+                    }
+                    exit(1);
+                });
+
+            run_tracker(tracker, cnt, quite);
         }
     }
 
-    fn run_tracker<C, R>(mut tracker: OnlineTracker<C, R>, cnt: usize, quite: bool, broadcast: bool)
+    fn run_tracker<C, R, S>(mut tracker: OnlineTracker<C, R, S>, cnt: usize, quite: bool)
     where
         C: CacheConnector<Item = Contents>,
         R: Record<LatsEntry>,
+        S: PacketSender,
     {
-        if broadcast {
-            tracker.set_broadcast(true).expect("Could not set to broadcast");
-        }
         if let Err(e) = tracker.track(cnt) {
             if !quite {
                 eprintln!("Online Tracker: {}", style(e).red());
@@ -220,15 +251,15 @@ mod uninteractive {
 mod interactive {
     use console::style;
     use dialoguer::{theme::ColorfulTheme, Confirmation, Input, Select};
-    use netcat::connection::{
-        local::LocalMemoryConnector, rdma::RdmaServerConnector, CacheConnector,
-    };
-    use netcat::online_tracker::{LatsEntry, OnlineTracker};
+    use netcat::connection::local::{LocalMemoryConnector, LocalPacketSender};
+    use netcat::connection::rdma::{RdmaServerConnector, RemotePacketSender};
+    use netcat::connection::{CacheConnector, PacketSender};
+    use netcat::online_tracker::{LatsEntry, OnlineTracker, OnlineTrackerBuilder};
     use netcat::output::{file::JsonRecorder, Record};
     use netcat::rpp::{params::*, Contents};
     use std::fs::File;
     use std::io::{stdout, BufWriter};
-    use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+    use std::net::{IpAddr, SocketAddr};
     use std::str::FromStr;
 
     pub fn run_session() {
@@ -241,30 +272,21 @@ mod interactive {
 
         let sock_addr = get_addr();
 
-        let cache_type = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Choose cache")
-            .default(0)
-            .items(super::CACHES)
-            .interact()
-            .unwrap();
-
-        let cparams = match super::CACHES[cache_type] {
-            "E5_DDIO" => XEON_E5_DDIO,
-            "E5" => XEON_E5,
-            "I7" => CORE_I7,
-            "custom" => get_custom_cache(),
-            _ => panic!("Unsupported cache"),
-        };
-
         if super::CONN_TYPES[conn_selection] == "rdma" {
+            let sender =
+                RemotePacketSender::new(sock_addr).unwrap_or_else(|e| panic!("{}", style(e).red()));
+
             let conn = match RdmaServerConnector::new(sock_addr) {
                 Ok(c) => c,
                 Err(e) => panic!("{}", style(e).red()),
             };
-            do_measurements(sock_addr, conn, cparams, false);
+            do_measurements(sender, conn);
         } else {
+            let sender =
+                LocalPacketSender::new(sock_addr).unwrap_or_else(|e| panic!("{}", style(e).red()));
+
             let conn = LocalMemoryConnector::new();
-            do_measurements(sock_addr, conn, cparams, true);
+            do_measurements(sender, conn);
         }
     }
     fn get_ip() -> IpAddr {
@@ -326,11 +348,26 @@ mod interactive {
         CacheParams::new(bytes_per_line, lines_per_set, cache_size)
     }
 
-    fn do_measurements<A, C>(addr: A, conn: C, cparams: CacheParams, broadcast: bool)
+    fn do_measurements<S, C>(sender: S, conn: C)
     where
-        A: ToSocketAddrs,
+        S: PacketSender,
         C: CacheConnector<Item = Contents>,
     {
+        let cache_type = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Choose cache")
+            .default(0)
+            .items(super::CACHES)
+            .interact()
+            .unwrap();
+
+        let cparams = match super::CACHES[cache_type] {
+            "E5_DDIO" => XEON_E5_DDIO,
+            "E5" => XEON_E5,
+            "I7" => CORE_I7,
+            "custom" => get_custom_cache(),
+            _ => panic!("Unsupported cache"),
+        };
+
         let file_name = get_filename();
         if file_name.is_empty() {
             eprintln!(
@@ -338,16 +375,32 @@ mod interactive {
                 style("stdout").green()
             );
             let output = JsonRecorder::new(BufWriter::new(stdout()));
-            let tracker = OnlineTracker::for_cache(addr, conn, false, output, cparams).unwrap();
 
-            run_tracker(tracker, broadcast);
+            let tracker = OnlineTrackerBuilder::new()
+                .set_conn(conn)
+                .set_sender(sender)
+                .set_cache(cparams)
+                .set_quite(false)
+                .set_output(output)
+                .finalize()
+                .unwrap_or_else(|e| panic!("{}", style(e).red()));
+
+            run_tracker(tracker);
         } else {
             let file = open_until_can(file_name);
 
             let output = JsonRecorder::new(BufWriter::new(file));
-            let tracker = OnlineTracker::for_cache(addr, conn, false, output, cparams).unwrap();
 
-            run_tracker(tracker, broadcast);
+            let tracker = OnlineTrackerBuilder::new()
+                .set_conn(conn)
+                .set_sender(sender)
+                .set_cache(cparams)
+                .set_quite(false)
+                .set_output(output)
+                .finalize()
+                .unwrap_or_else(|e| panic!("{}", style(e).red()));
+
+            run_tracker(tracker);
         }
     }
 
@@ -374,16 +427,13 @@ mod interactive {
         }
     }
 
-    fn run_tracker<C, R>(mut tracker: OnlineTracker<C, R>, broadcast: bool)
+    fn run_tracker<C, R, S>(mut tracker: OnlineTracker<C, R, S>)
     where
         C: CacheConnector<Item = Contents>,
         R: Record<LatsEntry>,
+        S: PacketSender,
     {
         let mut not_done = true;
-
-        if broadcast {
-            tracker.set_broadcast(true).expect("Could not set broadcast");
-        }
 
         while not_done {
             let cnt = get_cnt();
