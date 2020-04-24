@@ -1,7 +1,9 @@
-use crate::connection::{Address, CacheConnector, MemoryConnector, Time};
+use crate::connection::{Address, CacheConnector, MemoryConnector, PacketSender, Time};
 use std::alloc;
 use std::convert::TryInto;
 use std::io::Result;
+use std::io::{Error, ErrorKind};
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 
 pub struct LocalMemoryConnector {
     buf: *mut u8,
@@ -97,5 +99,46 @@ impl CacheConnector for LocalMemoryConnector {
 
     fn reserve(&mut self, size: usize) {
         self.allocate(size)
+    }
+}
+
+pub struct LocalPacketSender {
+    sock: UdpSocket,
+    sock_addr: SocketAddr,
+}
+
+impl LocalPacketSender {
+    pub fn new<A: ToSocketAddrs>(addr: A) -> Result<LocalPacketSender> {
+        // We do it this way and not by `connection` method be able to send to
+        // closed ports (with connection we would get ICMP back and fail next time)
+        let sock_addr = addr.to_socket_addrs()?.next().ok_or(Error::new(
+            ErrorKind::InvalidData,
+            "ERROR: could not resolve address.",
+        ))?;
+
+        // Allow the machine to automatically choose port for us
+        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| {
+            Error::new(
+                ErrorKind::AddrNotAvailable,
+                format!("ERROR: could not bind to address: {}", e),
+            )
+        })?;
+
+        sock.set_broadcast(true).map_err(|e| {
+            Error::new(
+                ErrorKind::ConnectionRefused,
+                format!("ERROR: Could not set to broadcast: {}", e),
+            )
+        })?;
+
+        Ok(LocalPacketSender { sock, sock_addr })
+    }
+}
+
+impl PacketSender for LocalPacketSender {
+    #[inline(always)]
+    fn send_packet(&mut self) -> Result<()> {
+        self.sock.send_to(&[0], self.sock_addr)?;
+        Ok(())
     }
 }

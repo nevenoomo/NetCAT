@@ -1,15 +1,15 @@
 //! # RDMA
 //! This module is responsible for RDMA connections and maintaining overall RDMA state
 #![allow(dead_code)]
-use crate::connection::{Address, CacheConnector, MemoryConnector, Time};
+use crate::connection::{Address, CacheConnector, MemoryConnector, PacketSender, Time};
 use bincode;
 use ibverbs;
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
-use std::net;
 use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Instant;
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket, TcpStream};
 
 const LOCAL_BUF_SIZE: usize = 4096;
 const WR_ID: u64 = 12_949_723_411_804_112_106; // some random value
@@ -103,7 +103,7 @@ impl RdmaServerConnector {
         }
     }
 
-    fn setup_qp<'a, A: net::ToSocketAddrs>(
+    fn setup_qp<'a, A: ToSocketAddrs>(
         addr: A,
         pd: &'a ibverbs::ProtectionDomain,
         cq: &'a ibverbs::CompletionQueue,
@@ -140,7 +140,7 @@ impl RdmaServerConnector {
         }
     }
 
-    fn xchg_endp<A: net::ToSocketAddrs>(
+    fn xchg_endp<A: ToSocketAddrs>(
         addr: A,
         endp: ibverbs::QueuePairEndpoint,
         lkey: ibverbs::RemoteKey,
@@ -150,7 +150,7 @@ impl RdmaServerConnector {
         msg.rkey = lkey; //self.mr.rkey();
         msg.raddr = laddr;
 
-        let mut stream = net::TcpStream::connect(addr).map_err(|e| {
+        let mut stream = TcpStream::connect(addr).map_err(|e| {
             Error::new(
                 ErrorKind::Other,
                 format!("ERROR: failed to connect to server: {}", e),
@@ -184,7 +184,7 @@ impl RdmaServerConnector {
         Ok(rmsg)
     }
 
-    fn setup_ib<A: net::ToSocketAddrs>(addr: A) -> Result<RdmaServerConnector> {
+    fn setup_ib<A: ToSocketAddrs>(addr: A) -> Result<RdmaServerConnector> {
         if !unsafe { FORK_INITED } {
             Self::fork_init()?;
             unsafe { FORK_INITED = true };
@@ -211,7 +211,7 @@ impl RdmaServerConnector {
     /// ## Panics
     /// Panics if there is no support for RDMA in the kernel, no RDMA devices where found,
     /// or if a device cannot be opened
-    pub fn new<A: net::ToSocketAddrs>(addr: A) -> Result<RdmaServerConnector> {
+    pub fn new<A: ToSocketAddrs>(addr: A) -> Result<RdmaServerConnector> {
         Self::setup_ib(addr)
     }
 
@@ -388,5 +388,46 @@ impl CacheConnector for RdmaServerConnector {
     #[inline(always)]
     fn time_access(&mut self, addr: Address) -> Result<Time> {
         self.read_timed(addr).map(|(_, t)| t)
+    }
+}
+
+pub struct RemotePacketSender {
+    sock: UdpSocket,
+    sock_addr: SocketAddr,
+}
+
+impl RemotePacketSender {
+    pub fn new<A: ToSocketAddrs>(addr: A) -> Result<RemotePacketSender> {
+        // We do it this way and not by `connection` method be able to send to
+        // closed ports (with connection we would get ICMP back and fail next time)
+        let sock_addr = addr.to_socket_addrs()?.next().ok_or(Error::new(
+            ErrorKind::InvalidData,
+            "ERROR: could not resolve address.",
+        ))?;
+
+        // Allow the machine to automatically choose port for us
+        let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| {
+            Error::new(
+                ErrorKind::AddrNotAvailable,
+                format!("ERROR: could not bind to address: {}", e),
+            )
+        })?;
+
+        sock.set_nonblocking(true).map_err(|e| {
+            Error::new(
+                ErrorKind::ConnectionRefused,
+                format!("ERROR: Could not set non blocking: {}", e),
+            )
+        })?;
+
+        Ok(RemotePacketSender { sock, sock_addr })
+    }
+}
+
+impl PacketSender for RemotePacketSender {
+    #[inline(always)]
+    fn send_packet(&mut self) -> Result<()> {
+        self.sock.send_to(&[0], self.sock_addr)?;
+        Ok(())
     }
 }

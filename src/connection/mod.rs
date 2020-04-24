@@ -62,3 +62,10 @@ pub trait CacheConnector {
     /// Reserves memory to be used for operations
     fn reserve(&mut self, size: usize);
 }
+
+/// Generalization over sending control packets
+pub trait PacketSender {
+
+    /// Sends a single packet for synchronization or locating RX ring buffer
+    fn send_packet(&mut self) -> Result<()>;
+}

@@ -421,7 +421,9 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             } else {
                 self.classifier.record(CacheTiming::Hit(lat));
                 // We removed too much
-                n -= 1;
+                if n > 0 {
+                    n -= 1;
+                }
             }
 
             // Stop when the size of the set equals the size of a cache set
