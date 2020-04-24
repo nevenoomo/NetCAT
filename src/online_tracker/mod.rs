@@ -159,13 +159,19 @@ where
             if err_cnt > MAX_FAIL_CNT {
                 return Err(Error::new(
                     ErrorKind::NotConnected,
-                    format!("ERROR: INITIALIZATION FAILED. Could not locate RX buffer in memory: {}", e),
+                    format!(
+                        "ERROR: INITIALIZATION FAILED. Could not locate RX buffer in memory: {}",
+                        e
+                    ),
                 ));
             }
         }
 
         if !self.quite {
-            eprintln!("Online Tracker: {}", style("INITIALIZATION SUSSESS").green());
+            eprintln!(
+                "Online Tracker: {}",
+                style("INITIALIZATION SUSSESS").green()
+            );
         }
 
         self.init = true;
@@ -187,7 +193,10 @@ where
         let quite = self.quite;
 
         if !self.init {
-            return Err(Error::new(ErrorKind::InvalidData, "ERROR: Online tracker is not initialized. Call init()."))
+            return Err(Error::new(
+                ErrorKind::InvalidData,
+                "ERROR: Online tracker is not initialized. Call init().",
+            ));
         }
 
         if !quite {
@@ -330,7 +339,9 @@ where
             // if the the *pos* set is activated (which we expect to be activated)
             // then the synchronization is not really needed, and we tacke the next
             // position in the pattern.
-            if probe_res[ctx.pos()].is_activated() && ctx.is_injected() {
+            // To get window index, corresponding to the current position, we need
+            // to devide the window length by 2 and add one. 
+            if probe_res[(es.len() >> 1) + 1].is_activated() && ctx.is_injected() {
                 ctx.sync_hit(self.pattern.next_pos(ctx.pos()));
             // if we did not register activation of the *pos* set, then we should
             // recover the position from the probes.
