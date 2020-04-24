@@ -234,16 +234,15 @@ mod uninteractive {
         R: Record<LatsEntry>,
         S: PacketSender,
     {
-        if let Err(e) = tracker.track(cnt) {
+        if let Err(e) = tracker.init() {
             if !quite {
                 eprintln!("Online Tracker: {}", style(e).red());
             }
         }
-        if !quite {
-            eprintln!(
-                "Online Tracker: {}",
-                style("MEASUREMENTS COMPLETED").green()
-            );
+        if let Err(e) = tracker.track(cnt) {
+            if !quite {
+                eprintln!("Online Tracker: {}", style(e).red());
+            }
         }
     }
 }
@@ -433,17 +432,21 @@ mod interactive {
         R: Record<LatsEntry>,
         S: PacketSender,
     {
-        let mut not_done = true;
+        let mut not_init = true;
+        while not_init {
+            if let Err(e) = tracker.init() {
+                eprintln!("Online Tracker: {}", style(e).red());
+            }
 
+            not_init = should_continue();
+        }
+
+        let mut not_done = true;
         while not_done {
             let cnt = get_cnt();
             if let Err(e) = tracker.track(cnt) {
                 eprintln!("Online Tracker: {}", style(e).red());
             }
-            eprintln!(
-                "Online Tracker: {}",
-                style("MEASUREMENTS COMPLETED").green()
-            );
 
             not_done = should_continue();
         }

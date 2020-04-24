@@ -13,6 +13,7 @@ pub use crate::rpp::{
     has_activation, ColorCode, ColoredSetCode, Contents, Latencies, ProbeResult, ProbeResult::*,
     Rpp, SetCode,
 };
+use console::style;
 use pattern::{Pattern, PatternIdx, PossiblePatterns};
 use std::collections::HashMap;
 use std::io::Result;
@@ -114,12 +115,13 @@ where
 
         let rpp = Rpp::with_params(conn, quite, cparam);
 
-        Ok(OnlineTracker{
+        Ok(OnlineTracker {
             rpp,
             output,
             sender,
             pattern: Default::default(),
-            quite
+            quite,
+            init: false,
         })
     }
 }
@@ -132,6 +134,7 @@ pub struct OnlineTracker<C, R, S> {
     sender: S,
     pattern: Pattern,
     quite: bool,
+    init: bool,
 }
 
 impl<C, R, S> OnlineTracker<C, R, S>
@@ -145,6 +148,30 @@ where
         self.quite = quite;
     }
 
+    pub fn init(&mut self) -> Result<()> {
+        let mut err_cnt = 0;
+        if !self.quite {
+            eprintln!("Online Tracker: {}", style("INITIALIZING").green());
+        }
+
+        while let Err(e) = self.locate_rx() {
+            err_cnt += 1;
+            if err_cnt > MAX_FAIL_CNT {
+                return Err(Error::new(
+                    ErrorKind::NotConnected,
+                    format!("ERROR: INITIALIZATION FAILED. Could not locate RX buffer in memory: {}", e),
+                ));
+            }
+        }
+
+        if !self.quite {
+            eprintln!("Online Tracker: {}", style("INITIALIZATION SUSSESS").green());
+        }
+
+        self.init = true;
+        Ok(())
+    }
+
     /// Starts online tracking phase.
     ///
     /// # Fails
@@ -156,30 +183,21 @@ where
     /// - No pattern in cache could be found even after retries
     /// - Cannot find the initial possition in RX buffer of the victim server
     ///
-    // UGLY maybe there is some other way to handle retries?
     pub fn track(&mut self, cnt: usize) -> Result<()> {
-        use console::style;
-        let mut err_cnt = 0;
         let quite = self.quite;
 
-        if !quite {
-            eprintln!("Online Tracker: {}", style("STARTED").green());
-        }
-        while let Err(e) = self.locate_rx() {
-            err_cnt += 1;
-            if err_cnt > MAX_FAIL_CNT {
-                return Err(Error::new(
-                    ErrorKind::NotConnected,
-                    format!("ERROR: Could not loacte RX buffer in memory: {}", e),
-                ));
-            }
-        }
-        if !quite {
-            eprintln!("Online Tracker: {}", style("Located ring buffer").green());
-            eprintln!("Online Tracker: {}", style("Starting measurements").green());
+        if !self.init {
+            return Err(Error::new(ErrorKind::InvalidData, "ERROR: Online tracker is not initialized. Call init()."))
         }
 
-        err_cnt = 0;
+        if !quite {
+            eprintln!(
+                "Online Tracker: {}",
+                style("Starting tracking measurements").green()
+            );
+        }
+
+        let mut err_cnt = 0;
         while let Err(e) = self.measure(cnt) {
             err_cnt += 1;
 
