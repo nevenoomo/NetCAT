@@ -147,7 +147,7 @@ impl RdmaServerConnector {
         laddr: ibverbs::RemoteAddr,
     ) -> Result<ibverbs::EndpointMsg> {
         let mut msg = ibverbs::EndpointMsg::from(endp);
-        msg.rkey = lkey; //self.mr.rkey();
+        msg.rkey = lkey;
         msg.raddr = laddr;
 
         let mut stream = TcpStream::connect(addr).map_err(|e| {
@@ -157,16 +157,9 @@ impl RdmaServerConnector {
             )
         })?;
 
-        let ser_msg = bincode::serialize(&msg).map_err(|e| {
-            Error::new(
-                ErrorKind::Other,
-                format!("ERROR: failed to serialize message: {}", e),
-            )
-        })?;
-
         // Sending info for RDMA handshake over TcpStream;
         // NOTE using writers in such a way may cause issues. May use .try_clone() instead
-        bincode::serialize_into(&mut stream, &ser_msg).map_err(|e| {
+        bincode::serialize_into(&mut stream, &msg).map_err(|e| {
             Error::new(
                 ErrorKind::Other,
                 format!("ERROR: failed to transmit serealized message: {}", e),

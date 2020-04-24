@@ -1,6 +1,6 @@
 use ibverbs;
 use netcat::connection::rdma::RdmaPrimitive;
-use netcat::rpp::{PAGE_SIZE, ADDR_NUM};
+use netcat::rpp::{ADDR_NUM, PAGE_SIZE};
 use std::env;
 use std::io::Error;
 use std::net;
@@ -76,22 +76,22 @@ fn main() {
     msg.rkey = mr.rkey();
     msg.raddr = ibverbs::RemoteAddr(laddr);
 
-    let addr = env::var(ADDR_KEY.to_string()).unwrap_or("0.0.0.0".to_string()) + ":9003";
+    let addr = env::var(ADDR_KEY.to_string()).unwrap_or("0.0.0.0:9003".to_string());
 
     let listner = net::TcpListener::bind(addr).expect("Listener failed");
-    let (stream, _addr) = listner.accept().expect("Accepting failed");
+    let (mut stream, _addr) = listner.accept().expect("Accepting failed");
 
     println!("Client connected!");
-    let read_stream = stream.try_clone().expect("could not clone stream");
 
     // This looks so much better.
-    let rmsg: ibverbs::EndpointMsg = bincode::deserialize_from(read_stream)
+    let rmsg: ibverbs::EndpointMsg = bincode::deserialize_from(&mut stream)
         .unwrap_or_else(|e| panic!("ERROR: failed to recieve data: {}", e));
+
     let _rkey = rmsg.rkey;
     let _raddr = rmsg.raddr;
     let rendpoint = rmsg.into();
 
-    bincode::serialize_into(stream, &msg).unwrap();
+    bincode::serialize_into(&mut stream, &msg).unwrap();
 
     let _qp = qp_init
         .handshake(rendpoint)
