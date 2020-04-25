@@ -105,4 +105,12 @@ impl TimingClassifier {
     pub fn is_miss(&self, t: Time) -> bool {
         self.classify(t).is_miss()
     }
+
+    /// Clears all the recorded data
+    pub fn clear(&mut self) {
+        self.hit_centroid = 0;
+        self.miss_centroid = 0;
+        self.hits.clear();
+        self.misses.clear();
+    }
 }

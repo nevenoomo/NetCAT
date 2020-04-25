@@ -18,10 +18,9 @@ use std::io::Result;
 use std::io::{Error, ErrorKind};
 use timing_classif::{CacheTiming, TimingClassifier};
 
-pub const DELTA: usize = 30;
+pub const DELTA: usize = 10;
 pub const TIMINGS_INIT_FILL: usize = 100;
-pub const TIMING_REFRESH_RATE: usize = 1000;
-pub const INSERT_RATE: usize = 100;
+pub const TIMING_REFRESH_RATE: usize = 100;
 
 pub type Contents = u8;
 
@@ -55,7 +54,7 @@ type SetsKey = BTreeSet<Address>;
 type EvictionSets = Vec<EvictionSet>;
 // a mapping from the color code to the eviction sets, corresponding to this color
 // when we find a new set, consisting of page aligned addresses starting at the beginning of the page
-// we get 64 more sets, which will be of the same color as we change only bits from 6 to 12, which are 
+// we get 64 more sets, which will be of the same color as we change only bits from 6 to 12, which are
 // for page offset
 type ColoredSets = Vec<EvictionSets>;
 
@@ -174,11 +173,19 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             .choose_multiple(&mut rng, TIMINGS_INIT_FILL)
         {
             // here we read from the main memory
-            let miss_time = self.conn.time_access(ofs).expect("Failed to time memory access");
+            let miss_time = self
+                .conn
+                .time_access(ofs)
+                .expect("Failed to time memory access");
 
             // here we cache the address and read again from cache
-            self.conn.cache(ofs).expect("Failed to cache addr in while training");
-            let hit_time = self.conn.time_access(ofs).expect("Failed to time cache access");
+            self.conn
+                .cache(ofs)
+                .expect("Failed to cache addr in while training");
+            let hit_time = self
+                .conn
+                .time_access(ofs)
+                .expect("Failed to time cache access");
 
             // we expect the latency from main memory to be bigger that from LLC
             if hit_time > miss_time {
@@ -211,16 +218,29 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             );
             pb.set_prefix("Building sets:");
         }
+
+        let mut err_cnt = 0;
+
         while self.profiled() < self.params.n_sets {
             match self.build_set() {
                 Ok(set) => self.check_set(set),
                 Err(e) => {
+                    if e.kind() == ErrorKind::UnexpectedEof && !self.quite {
+                        panic!("{}", style(e).red());
+                    }
+
                     if !self.quite {
                         eprintln!("{}", style(e).red());
                     }
                     // If case of error we retrain the classifier to ensure correct timings
-                    // MAYBE clean classifier before retraining
+                    if err_cnt > TIMING_REFRESH_RATE {
+                        // Something really bad happened. Need to refresh data.
+                        err_cnt = 0;
+                        self.classifier.clear();
+                    }
+
                     self.train_classifier();
+                    err_cnt += 1;
                 }
             }
             if !self.quite {
@@ -252,17 +272,15 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     fn add_sets(&mut self, set: EvictionSet) -> Result<()> {
         const CTL_BIT: usize = 6; // 6 - 12 (lower bits - lower val)
         const NUM_VARIANTS: usize = 64; // bits 12 - 6 determine the cache set. We have 2^6 = 64 options to change those
-        
         if !self.is_unique(&set, 0)? {
             return Ok(());
-        } 
+        }
 
         // this vector corresponds to the new color which we have profiled
         // one color corresponds to as much sets as there are on one page
-        // other sets for pages with the same color will not pass the uniqueness check 
+        // other sets for pages with the same color will not pass the uniqueness check
         let mut sets = Vec::with_capacity(self.params.n_sets_per_page);
         sets.push(set.clone());
-        
         for i in 1..NUM_VARIANTS {
             // We construct 64 new sets given one
             let new_set = set.iter().copied().map(|x| x ^ (i << CTL_BIT)).collect(); // xor all options with addrs from the given set
@@ -275,10 +293,9 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         Ok(())
     }
 
-
     /// Check whether a given set is unique
     /// Will test it against all other sets with different colors
-    /// **and addresses with bits 6-12 equal to `idx`**. This is 
+    /// **and addresses with bits 6-12 equal to `idx`**. This is
     /// the nessessary condition for them to interfere with each other.
     fn is_unique(&mut self, set: &EvictionSet, idx: usize) -> Result<bool> {
         use rand::seq::IteratorRandom;
@@ -287,7 +304,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
                                     // taking the most probable result
         let mut unique = true;
 
-        // We need to check sets from vector inside `colored_sets` vector with the 
+        // We need to check sets from vector inside `colored_sets` vector with the
         // given `idx`
         for other_set in self.colored_sets.iter().map(|v| &v[idx]) {
             let mut score = 0;
@@ -303,7 +320,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
                 // evict `test_addr`
                 self.conn.cache_all(set.iter().copied())?;
 
-                // We expect this to be a cache hit, as our new set is unique and 
+                // We expect this to be a cache hit, as our new set is unique and
                 // cover a **completely different** cache set
                 let lat = self.conn.time_access(test_addr)?;
 
@@ -329,10 +346,17 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             let mut max_addr = 0;
 
             if n > self.addrs.len() {
+                if self.addrs.len() < self.params.n_lines + 1 {
+                    return Err(Error::new(ErrorKind::UnexpectedEof, "ERROR: No addrs left"));
+                }
+
                 // Here we excided the number of addrs, but registered no eviction
-                // We remove the faulty address not to cause more issues 
+                // We remove the faulty address not to cause more issues
                 self.addrs.remove(&max_addr);
-                return Err(Error::new(ErrorKind::Other, "ERROR: cannot build set for the chosen address."));
+                return Err(Error::new(
+                    ErrorKind::Other,
+                    "ERROR: cannot build set for the chosen address.",
+                ));
             }
 
             let mut sub_set: EvictionSet = self.addrs.iter().take(n).copied().collect();
@@ -348,7 +372,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             // To this end we have an address with the maximum latency. This is the candidate for
             // building eviction set for.
 
-            // Bring `max_addr` into cache  
+            // Bring `max_addr` into cache
             self.conn.cache(max_addr)?;
 
             // Bring all other addrs (except `max_addr` into the cache), which should cause
