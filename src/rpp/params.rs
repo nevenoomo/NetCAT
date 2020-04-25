@@ -1,5 +1,5 @@
 pub const PAGE_SIZE: usize = 4096; // 4 KiB
-pub const ADDR_NUM: usize = 10000; // We take this number from the netcat article
+pub const ADDR_NUM: usize = 15000; // We take this number from the netcat article
 
 pub static XEON_E5: CacheParams = CacheParams {
     bytes_per_line: 64,
