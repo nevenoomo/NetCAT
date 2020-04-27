@@ -7,7 +7,7 @@ const DEFAULT_MEASUREMENT_CNT: &str = "1000";
 const DEFAULT_CACHE: &str = "E5_DDIO";
 
 static CONN_TYPES: &[&str] = &["rdma", "local"];
-static CACHES: &[&str] = &["E5_DDIO", "E5", "I7", "custom"];
+static CACHES: &[&str] = &["E5_DDIO", "E5", "I7", "PLATINUM", "PLATINUM_DDIO", "custom"];
 
 fn main() {
     let matches = app_cli_config().get_matches();
@@ -126,6 +126,8 @@ mod uninteractive {
             "E5" => XEON_E5,
             "E5_DDIO" => XEON_E5_DDIO,
             "I7" => CORE_I7,
+            "PLATINUM" => XEON_PLATINUM,
+            "PLATINUM_DDIO" => XEON_PLATINUM_DDIO, 
             "custom" => {
                 let mut vals = args.values_of("custom_cache").unwrap();
                 let bytes_per_line = vals.next().unwrap().parse().unwrap();
@@ -363,6 +365,8 @@ mod interactive {
             "E5_DDIO" => XEON_E5_DDIO,
             "E5" => XEON_E5,
             "I7" => CORE_I7,
+            "PLATINUM" => XEON_PLATINUM,
+            "PLATINUM_DDIO" => XEON_PLATINUM_DDIO, 
             "custom" => get_custom_cache(),
             _ => panic!("Unsupported cache"),
         };

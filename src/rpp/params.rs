@@ -16,17 +16,29 @@ pub static XEON_E5_DDIO: CacheParams = CacheParams {
 pub static CORE_I7: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 12,
-    cache_size: 6_291_456, // 20 MiB
+    cache_size: 6_291_456, // 6 MiB
 };
 
 // This is for testing, i7 has no DDIO
 pub static CORE_I7_DDIO: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 2,
-    cache_size: 6_291_456, // 20 MiB
+    cache_size: 6_291_456, // 6 MiB
 };
 
-/// Parameters for Remote PRIME+PROBE. 
+pub static XEON_PLATINUM: CacheParams = CacheParams {
+    bytes_per_line: 64,
+    lines_per_set: 11,
+    cache_size: 34603008, // 33 MiB
+};
+
+pub static XEON_PLATINUM_DDIO: CacheParams = CacheParams {
+    bytes_per_line: 64,
+    lines_per_set: 2,
+    cache_size: 34603008, // 33 MiB
+};
+
+/// Parameters for Remote PRIME+PROBE.
 /// Describes the last level cache of the targeted prosessor
 #[derive(Clone, Copy)]
 pub struct CacheParams {
