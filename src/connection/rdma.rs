@@ -6,10 +6,9 @@ use bincode;
 use ibverbs;
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
+use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
 use std::sync::Arc;
-use std::sync::RwLock;
 use std::time::Instant;
-use std::net::{SocketAddr, ToSocketAddrs, UdpSocket, TcpStream};
 
 const LOCAL_BUF_SIZE: usize = 4096;
 const WR_ID: u64 = 12_949_723_411_804_112_106; // some random value
@@ -37,7 +36,7 @@ pub struct RdmaServerConnector {
     // field order matters!!! Otherwise will panic on drop.
     iqp: InitializedQp,
     cq: Arc<ibverbs::CompletionQueue>,
-    mr: RwLock<ibverbs::MemoryRegion<RdmaPrimitive>>,
+    mr: ibverbs::MemoryRegion<RdmaPrimitive>,
     pd: Arc<ibverbs::ProtectionDomain>,
     ctx: Arc<ibverbs::Context>,
 }
@@ -47,10 +46,9 @@ impl RdmaServerConnector {
         let dev_list = Self::get_devs()?;
 
         // Get the first device
-        let dev = dev_list.get(0).ok_or(Error::new(
-            ErrorKind::Other,
-            "ERROR: No RDMA devices in list",
-        ))?;
+        let dev = dev_list
+            .get(0)
+            .ok_or_else(|| Error::new(ErrorKind::Other, "ERROR: No RDMA devices in list"))?;
 
         // Here the device is opened. Port (1) and GID are queried automaticaly
         dev.open().map_err(|e| {
@@ -90,17 +88,14 @@ impl RdmaServerConnector {
         }
     }
 
-    fn register_mr(
-        pd: &ibverbs::ProtectionDomain,
-    ) -> Result<RwLock<ibverbs::MemoryRegion<RdmaPrimitive>>> {
+    fn register_mr(pd: &ibverbs::ProtectionDomain) -> Result<ibverbs::MemoryRegion<RdmaPrimitive>> {
         // here we need to allocate memory and register a memory region just for RDMA porposes
-        match pd.allocate::<RdmaPrimitive>(LOCAL_BUF_SIZE) {
-            Ok(mr) => Ok(RwLock::new(mr)),
-            Err(e) => Err(Error::new(
+        pd.allocate::<RdmaPrimitive>(LOCAL_BUF_SIZE).map_err(|e| {
+            Error::new(
                 ErrorKind::Other,
                 format!("ERROR: registering Memory Region failed: {}", e),
-            )),
-        }
+            )
+        })
     }
 
     fn setup_qp<'a, A: ToSocketAddrs>(
@@ -186,8 +181,8 @@ impl RdmaServerConnector {
         let pd = Self::aquire_pd(ctx.clone())?;
         let cq = Self::aquire_cq(ctx.clone())?;
         let mr = Self::register_mr(&pd)?;
-        let lkey = mr.read().unwrap().rkey();
-        let laddr = ibverbs::RemoteAddr((&(mr.read().unwrap())[0] as *const RdmaPrimitive) as u64);
+        let lkey = mr.rkey();
+        let laddr = ibverbs::RemoteAddr((&mr[0..]).as_ptr() as u64);
         let iqp = Self::setup_qp(addr, &pd, &cq, lkey, laddr)?;
 
         Ok(RdmaServerConnector {
@@ -236,54 +231,36 @@ impl RdmaServerConnector {
     #[inline(always)]
     fn post_read(&self, addr: u64) -> Result<()> {
         unsafe {
-            self.iqp.qp.post_read_single(
-                &self.mr.read().unwrap(),
-                addr,
-                self.iqp.rkey.0,
-                WR_ID,
-                true,
-            )
+            self.iqp
+                .qp
+                .post_read_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, true)
         }
     }
 
     #[inline(always)]
     fn post_write(&self, addr: u64) -> Result<()> {
         unsafe {
-            self.iqp.qp.post_write_single(
-                &self.mr.read().unwrap(),
-                addr,
-                self.iqp.rkey.0,
-                WR_ID,
-                true,
-            )
+            self.iqp
+                .qp
+                .post_write_single(&self.mr, addr, self.iqp.rkey.0, WR_ID, true)
         }
     }
 
     #[inline(always)]
     fn post_read_buf(&self, addr: u64, n: usize) -> Result<()> {
         unsafe {
-            self.iqp.qp.post_read_buf(
-                &self.mr.read().unwrap(),
-                n,
-                addr,
-                self.iqp.rkey.0,
-                WR_ID,
-                true,
-            )
+            self.iqp
+                .qp
+                .post_read_buf(&self.mr, n, addr, self.iqp.rkey.0, WR_ID, true)
         }
     }
 
     #[inline(always)]
     fn post_write_buf(&self, addr: u64, n: usize) -> Result<()> {
         unsafe {
-            self.iqp.qp.post_write_buf(
-                &self.mr.read().unwrap(),
-                n,
-                addr,
-                self.iqp.rkey.0,
-                WR_ID,
-                true,
-            )
+            self.iqp
+                .qp
+                .post_write_buf(&self.mr, n, addr, self.iqp.rkey.0, WR_ID, true)
         }
     }
 
@@ -294,7 +271,7 @@ impl RdmaServerConnector {
             if completed.is_empty() {
                 continue;
             }
-            if completed.iter().find(|wc| wc.wr_id() == WR_ID).is_some() {
+            if completed.iter().any(|wc| wc.wr_id() == WR_ID) {
                 return Ok(());
             }
         }
@@ -322,7 +299,7 @@ impl MemoryConnector for RdmaServerConnector {
         self.post_read(self.iqp.raddr.0 + (ofs as u64))?;
         self.poll_cq_is_done(&mut completions)?;
 
-        Ok(self.mr.read().unwrap()[0])
+        Ok(self.mr[0])
     }
 
     #[inline(always)]
@@ -342,11 +319,7 @@ impl MemoryConnector for RdmaServerConnector {
     // FIXIT this is not safe concurently
     fn write(&mut self, addr: usize, what: &Self::Item) -> Result<()> {
         // the desired value is taken from the memory region
-        {
-            let mut buf = self.mr.write().expect("ERROR: could not aquire write lock");
-            buf[0] = *what;
-        }
-        
+        self.mr[0] = *what;
         self.write_from_mr(addr)
     }
 
@@ -393,7 +366,7 @@ impl RemotePacketSender {
     pub fn new<A: ToSocketAddrs>(addr: A) -> Result<RemotePacketSender> {
         // We do it this way and not by `connection` method be able to send to
         // closed ports (with connection we would get ICMP back and fail next time)
-        let sock_addr = addr.to_socket_addrs()?.next().ok_or(Error::new(
+        let sock_addr = addr.to_socket_addrs()?.next().ok_or_else(|| Error::new(
             ErrorKind::InvalidData,
             "ERROR: could not resolve address.",
         ))?;

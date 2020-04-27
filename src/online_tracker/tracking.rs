@@ -32,7 +32,7 @@ impl TrackingContext {
     }
     #[inline(always)]
     pub(crate) fn pos(&self) -> PatternIdx {
-        self.pos.clone()
+        self.pos
     }
     #[inline(always)]
     pub(crate) fn sync_status(&self) -> SyncStatus {

@@ -4,13 +4,13 @@ pub const ADDR_NUM: usize = 15000; // We take this number from the netcat articl
 pub static XEON_E5: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 20,
-    cache_size: 20971520, // 20 MiB
+    cache_size: 20_971_520, // 20 MiB
 };
 
 pub static XEON_E5_DDIO: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 2,
-    cache_size: 20971520, // 20 MiB
+    cache_size: 20_971_520, // 20 MiB
 };
 
 pub static CORE_I7: CacheParams = CacheParams {
@@ -29,13 +29,13 @@ pub static CORE_I7_DDIO: CacheParams = CacheParams {
 pub static XEON_PLATINUM: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 11,
-    cache_size: 34603008, // 33 MiB
+    cache_size: 34_603_008, // 33 MiB
 };
 
 pub static XEON_PLATINUM_DDIO: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 2,
-    cache_size: 34603008, // 33 MiB
+    cache_size: 34_603_008, // 33 MiB
 };
 
 /// Parameters for Remote PRIME+PROBE.

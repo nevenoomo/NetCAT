@@ -152,12 +152,12 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     }
 
     /// Primes all sets in a vector
-    pub fn prime_all(&mut self, set_codes: &Vec<SetCode>) -> Result<()> {
+    pub fn prime_all(&mut self, set_codes: &[SetCode]) -> Result<()> {
         set_codes.iter().map(|x| self.prime(x)).collect()
     }
 
     /// Probes all sets in a vector
-    pub fn probe_all(&mut self, set_codes: &Vec<SetCode>) -> Result<Vec<ProbeResult<Latencies>>> {
+    pub fn probe_all(&mut self, set_codes: &[SetCode]) -> Result<Vec<ProbeResult<Latencies>>> {
         set_codes.iter().map(|x| self.probe(x)).collect()
     }
 
@@ -524,7 +524,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
 /// Test whether an activation has been observed in the provided Probe Results
 #[inline(always)]
-pub fn has_activation<T>(probes: &Vec<ProbeResult<T>>) -> bool {
+pub fn has_activation<T>(probes: &[ProbeResult<T>]) -> bool {
     probes.iter().any(ProbeResult::is_activated)
 }
 

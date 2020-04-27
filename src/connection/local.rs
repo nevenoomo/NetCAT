@@ -9,11 +9,17 @@ pub struct LocalMemoryConnector {
     buf: *mut u8,
 }
 
-impl LocalMemoryConnector {
-    pub fn new() -> LocalMemoryConnector {
+impl Default for LocalMemoryConnector {
+    fn default() -> Self {
         LocalMemoryConnector {
             buf: std::ptr::null_mut(),
         }
+    }
+}
+
+impl LocalMemoryConnector {
+    pub fn new() -> LocalMemoryConnector {
+        Default::default()
     }
 }
 
@@ -37,12 +43,12 @@ impl MemoryConnector for LocalMemoryConnector {
     // and the timing won't work
     #[inline(never)]
     fn read(&self, ofs: usize) -> Result<Self::Item> {
-        Ok(unsafe { *self.buf.offset(ofs as isize) })
+        Ok(unsafe { *self.buf.add(ofs) })
     }
 
     #[inline(never)]
     fn write(&mut self, ofs: usize, what: &Self::Item) -> Result<()> {
-        unsafe { *self.buf.offset(ofs as isize) = *what };
+        unsafe { *self.buf.add(ofs) = *what };
 
         Ok(())
     }
@@ -111,7 +117,7 @@ impl LocalPacketSender {
     pub fn new<A: ToSocketAddrs>(addr: A) -> Result<LocalPacketSender> {
         // We do it this way and not by `connection` method be able to send to
         // closed ports (with connection we would get ICMP back and fail next time)
-        let sock_addr = addr.to_socket_addrs()?.next().ok_or(Error::new(
+        let sock_addr = addr.to_socket_addrs()?.next().ok_or_else(|| Error::new(
             ErrorKind::InvalidData,
             "ERROR: could not resolve address.",
         ))?;

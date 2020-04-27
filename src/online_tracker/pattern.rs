@@ -119,7 +119,7 @@ impl Pattern {
     pub fn recover_next<A>(
         &self,
         pos: PatternIdx,
-        probe_res: &Vec<ProbeResult<A>>,
+        probe_res: &[ProbeResult<A>],
     ) -> Result<PatternIdx> {
         // First we try to find an activation *right after* the current position.
         // Here we assume that just an other packet interfered with our
@@ -154,10 +154,10 @@ impl Pattern {
 
         // We failed to find any of the activations. This is a harsh error, which we cannot
         // recover from.
-        return Err(Error::new(
+        Err(Error::new(
             ErrorKind::Other,
             "ERROR: Cannot recover position",
-        ));
+        ))
     }
 }
 

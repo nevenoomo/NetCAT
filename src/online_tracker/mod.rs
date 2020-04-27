@@ -94,17 +94,17 @@ where
 
     /// Finalizes the construction. Fails if `conn`, `output`, or `sender` not set.
     pub fn finalize(self) -> Result<OnlineTracker<C, R, S>> {
-        let conn = self.conn.ok_or(Error::new(
+        let conn = self.conn.ok_or_else(|| Error::new(
             ErrorKind::InvalidData,
             "ERROR: connector is not set",
         ))?;
 
-        let output = self.output.ok_or(Error::new(
+        let output = self.output.ok_or_else(|| Error::new(
             ErrorKind::InvalidData,
             "ERROR: output is not set",
         ))?;
 
-        let sender = self.sender.ok_or(Error::new(
+        let sender = self.sender.ok_or_else(|| Error::new(
             ErrorKind::InvalidData,
             "ERROR: packet sender is not set",
         ))?;
@@ -313,7 +313,7 @@ where
 
         for _ in 0..cnt {
             let mut probe_res;
-            let es = self.pattern.window(ctx.pos()).copied().collect();
+            let es: Vec<SetCode> = self.pattern.window(ctx.pos()).copied().collect();
             self.rpp.prime_all(&es)?;
 
             loop {
@@ -340,7 +340,7 @@ where
             // then the synchronization is not really needed, and we tacke the next
             // position in the pattern.
             // To get window index, corresponding to the current position, we need
-            // to devide the window length by 2 and add one. 
+            // to devide the window length by 2 and add one.
             if probe_res[(es.len() >> 1) + 1].is_activated() && ctx.is_injected() {
                 ctx.sync_hit(self.pattern.next_pos(ctx.pos()));
             // if we did not register activation of the *pos* set, then we should
