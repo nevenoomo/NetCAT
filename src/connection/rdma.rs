@@ -279,7 +279,7 @@ impl RdmaServerConnector {
 
     #[inline(always)]
     fn write_from_mr(&mut self, addr: Address) -> Result<()> {
-        let mut completions = [ibverbs::ibv_wc::default(); 16];
+        let mut completions = [ibverbs::ibv_wc::default()];
         self.post_write(self.iqp.raddr.0 + (addr as u64))?;
         self.poll_cq_is_done(&mut completions)?;
 
@@ -295,7 +295,7 @@ impl MemoryConnector for RdmaServerConnector {
 
     #[inline(always)]
     fn read(&self, ofs: usize) -> Result<Self::Item> {
-        let mut completions = [ibverbs::ibv_wc::default(); 16];
+        let mut completions = [ibverbs::ibv_wc::default()];
         self.post_read(self.iqp.raddr.0 + (ofs as u64))?;
         self.poll_cq_is_done(&mut completions)?;
 
@@ -316,7 +316,6 @@ impl MemoryConnector for RdmaServerConnector {
     }
 
     #[inline(always)]
-    // FIXIT this is not safe concurently
     fn write(&mut self, addr: usize, what: &Self::Item) -> Result<()> {
         // the desired value is taken from the memory region
         self.mr[0] = *what;

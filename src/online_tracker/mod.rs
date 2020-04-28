@@ -178,6 +178,11 @@ where
         Ok(())
     }
 
+    /// Allows to change output between measurements
+    pub fn set_output(&mut self, output: R) {
+        self.output = output;
+    } 
+
     /// Starts online tracking phase.
     ///
     /// # Fails
@@ -198,6 +203,8 @@ where
                 "ERROR: Online tracker is not initialized. Call init().",
             ));
         }
+
+        self.output.separate()?;
 
         if !quite {
             eprintln!(

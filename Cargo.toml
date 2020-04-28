@@ -20,8 +20,8 @@ hdrhistogram = "7.0.0"
 newtype_derive = "0.1.6"
 custom_derive = "0.1.7"
 clap = "2.33.0" 
-console = "0.10.0"
-dialoguer = "0.5.0"
+console = "0.11.1"
+dialoguer = "0.5.1"
 indicatif = "0.14.0"
 
 [dev-dependencies]

@@ -8,6 +8,11 @@ use std::io::Result;
 pub trait Record<T> {
     /// Saves data to the underlying storage
     fn record(&mut self, data: T) -> Result<()>;
+
+    /// Adds separator to the recordings
+    fn separate(&mut self) -> Result<()> {
+        Ok(())
+    }
 }
 
 pub mod file {
@@ -36,7 +41,7 @@ pub mod file {
     impl<W: Write> Write for JsonRecorder<W> {
         // IDEA maybe add json validation
         fn write(&mut self, buf: &[u8]) -> Result<usize> {
-            self.0.write(buf) 
+            self.0.write(buf)
         }
 
         fn flush(&mut self) -> Result<()> {
@@ -48,6 +53,11 @@ pub mod file {
     impl<T: Serialize, W: Write> Record<T> for JsonRecorder<W> {
         fn record(&mut self, data: T) -> Result<()> {
             to_writer(self, &data).map_err(|e| Error::new(ErrorKind::InvalidData, e))
+        }
+
+        fn separate(&mut self) -> Result<()> {
+            self.write(b"\n------------------------------------------------------------------------------------\n")?;
+            Ok(())
         }
     }
 }
