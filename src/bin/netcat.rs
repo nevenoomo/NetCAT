@@ -127,7 +127,7 @@ mod uninteractive {
             "E5_DDIO" => XEON_E5_DDIO,
             "I7" => CORE_I7,
             "PLATINUM" => XEON_PLATINUM,
-            "PLATINUM_DDIO" => XEON_PLATINUM_DDIO, 
+            "PLATINUM_DDIO" => XEON_PLATINUM_DDIO,
             "custom" => {
                 let mut vals = args.values_of("custom_cache").unwrap();
                 let bytes_per_line = vals.next().unwrap().parse().unwrap();
@@ -366,7 +366,7 @@ mod interactive {
             "E5" => XEON_E5,
             "I7" => CORE_I7,
             "PLATINUM" => XEON_PLATINUM,
-            "PLATINUM_DDIO" => XEON_PLATINUM_DDIO, 
+            "PLATINUM_DDIO" => XEON_PLATINUM_DDIO,
             "custom" => get_custom_cache(),
             _ => panic!("Unsupported cache"),
         };

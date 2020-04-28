@@ -11,14 +11,16 @@ use console::style;
 use indicatif;
 pub use params::*;
 use rand;
+use rand::seq::IteratorRandom;
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::{BTreeSet, HashSet};
 use std::io::Result;
 use std::io::{Error, ErrorKind};
+use std::iter::FromIterator;
 use timing_classif::{CacheTiming, TimingClassifier};
 
-pub const DELTA: usize = 10;
+pub const DELTA: usize = 5;
 pub const TIMINGS_INIT_FILL: usize = 100;
 pub const TIMING_REFRESH_RATE: usize = 100;
 
@@ -162,7 +164,6 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     }
 
     fn train_classifier(&mut self) {
-        use rand::seq::IteratorRandom;
         // we assume that the memory region is not cached
         let mut rng = rand::thread_rng();
 
@@ -225,12 +226,12 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             match self.build_set() {
                 Ok(set) => self.check_set(set),
                 Err(e) => {
-                    if e.kind() == ErrorKind::UnexpectedEof && !self.quite {
-                        panic!("{}", style(e).red());
-                    }
-
                     if !self.quite {
-                        eprintln!("{}", style(e).red());
+                        match e.kind() {
+                            ErrorKind::UnexpectedEof => panic!("{}", style(e).red()),
+                            ErrorKind::InvalidInput => (),
+                            _ => eprintln!("{}", style(e).red()),
+                        }
                     }
                     // If case of error we retrain the classifier to ensure correct timings
                     if err_cnt > TIMING_REFRESH_RATE {
@@ -255,12 +256,43 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     }
 
     fn check_set(&mut self, set: EvictionSet) {
+        match self.is_unique(&set, 0) {
+            Ok(u) if !u => return,
+            Err(e) if !self.quite => {
+                eprintln!("{}", style(e).red());
+                return;
+            }
+            _ => (),
+        }
         if let Err(e) = self.add_sets(set) {
-            eprintln!("{}", e);
+            if !self.quite {
+                eprintln!("{}", style(e).red());
+            }
         }
     }
 
+    fn check_evicts<I: Iterator<Item = Address>>(&mut self, set: I, addr: Address) -> Result<bool> {
+        // bring `addr` into cache
+        self.conn.cache(addr)?;
+
+        // bring addrs from the `set` into cache, which shold cause eviction of addr
+        self.conn.cache_all(set)?;
+
+        // time access to `addr`
+        let lat = self.conn.time_access(addr)?;
+
+        // it should be a miss
+        if self.classifier.is_miss(lat) {
+            self.classifier.record(CacheTiming::Miss(lat));
+            return Ok(true);
+        }
+
+        self.classifier.record(CacheTiming::Hit(lat));
+        Ok(false)
+    }
+
     // this step might fails only due to read & write fails. read and write fail only as the last resort
+    // TODO this may halt forever
     fn build_set(&mut self) -> Result<EvictionSet> {
         let (mut s, x) = self.forward_selection()?;
         self.backward_selection(&mut s, x)?;
@@ -272,9 +304,6 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     fn add_sets(&mut self, set: EvictionSet) -> Result<()> {
         const CTL_BIT: usize = 6; // 6 - 12 (lower bits - lower val)
         const NUM_VARIANTS: usize = 64; // bits 12 - 6 determine the cache set. We have 2^6 = 64 options to change those
-        if !self.is_unique(&set, 0)? {
-            return Ok(());
-        }
 
         // this vector corresponds to the new color which we have profiled
         // one color corresponds to as much sets as there are on one page
@@ -298,8 +327,6 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     /// **and addresses with bits 6-12 equal to `idx`**. This is
     /// the nessessary condition for them to interfere with each other.
     fn is_unique(&mut self, set: &EvictionSet, idx: usize) -> Result<bool> {
-        use rand::seq::IteratorRandom;
-
         const REPEATING: usize = 5; // We will try for multiple times,
                                     // taking the most probable result
         let mut unique = true;
@@ -340,56 +367,44 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
     fn forward_selection(&mut self) -> Result<(EvictionSet, Address)> {
         let mut n = self.params.n_lines + 1;
+        if self.addrs.len() < n {
+            return Err(Error::new(ErrorKind::UnexpectedEof, "ERROR: No addrs left"));
+        }
+        let total_addrs = self.addrs.len();
 
-        loop {
+        while n <= total_addrs {
             let mut max_lat = 0;
-            let mut max_addr = 0;
+            let mut max_idx = 0;
 
-            if n > self.addrs.len() {
-                if self.addrs.len() < self.params.n_lines + 1 {
-                    return Err(Error::new(ErrorKind::UnexpectedEof, "ERROR: No addrs left"));
-                }
-
-                // Here we excided the number of addrs, but registered no eviction
-                // We remove the faulty address not to cause more issues
-                self.addrs.remove(&max_addr);
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "ERROR: cannot build set for the chosen address.",
-                ));
-            }
-
-            let mut sub_set: EvictionSet = self.addrs.iter().take(n).copied().collect();
+            let mut sub_set: Vec<Address> = self.addrs.iter().copied().take(n).collect();
 
             // Walk over all the addrs of a selected subset and finding the address with the maximum latency
-            for &addr in sub_set.iter() {
+            for (i, &addr) in sub_set.iter().enumerate() {
                 let lat = self.conn.time_access(addr)?;
                 if lat > max_lat {
                     max_lat = lat;
-                    max_addr = addr;
+                    max_idx = i;
                 }
             }
-            // To this end we have an address with the maximum latency. This is the candidate for
-            // building eviction set for.
+            // `max_addr` is a candidate address
+            let max_addr = sub_set.swap_remove(max_idx);
 
-            // Bring `max_addr` into cache
-            self.conn.cache(max_addr)?;
-
-            // Bring all other addrs (except `max_addr` into the cache), which should cause
-            // evinction of the `max_addr`
-            sub_set.remove(&max_addr);
-            self.conn.cache_all(sub_set.iter().copied())?;
-            let lat = self.conn.time_access(max_addr)?;
-
-            // Determine if `max_addr` got evicted from the cache by this set
-            if self.classifier.is_miss(lat) {
-                self.classifier.record(CacheTiming::Miss(lat));
+            if self.check_evicts(sub_set.iter().copied(), max_addr)? {
+                // From Vec to HashSet
+                let sub_set = EvictionSet::from_iter(sub_set.into_iter());
                 return Ok((sub_set, max_addr));
             }
 
             n += 1;
-            self.classifier.record(CacheTiming::Hit(lat));
         }
+
+        // Here we excided the number of addrs, but registered no eviction
+        // We remove the faulty address not to cause more issues
+        // MAYBE remove address, which we could not evict?
+        Err(Error::new(
+            ErrorKind::Other,
+            "ERROR: cannot build set for the chosen address.",
+        ))
     }
 
     // Here we assume that set `s` truly evicts address `x`
@@ -404,57 +419,53 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             return Ok(());
         }
 
-        // we may begin by trying to remove part of the overhead. If we fail, the trying less in ok
         let mut n = 1;
-
-        loop {
-            if s.len() < self.params.n_lines {
-                return Err(Error::new(
-                    ErrorKind::Other,
-                    "ERROR: Set shrunk too much during backwards selection",
-                ));
-            }
-
+        // Stop when the size of the set equals the size of a cache set
+        while s.len() > self.params.n_lines + DELTA && n > 0 {
             // if S is relatively small, then we do not use step adjusting
-            n = if s.len() <= self.params.n_lines + DELTA {
-                1
-            } else {
-                min(n, s.len() >> 1) // >> 1 == / 2
-            };
+            n = min(n, s.len() >> 1); // >> 1 == / 2
 
-            let s_rm: EvictionSet = s.iter().take(n).copied().collect();
+            let s_rm = s
+                .iter()
+                .copied()
+                .choose_multiple(&mut rand::thread_rng(), n);
 
-            // Bring `x` into cache
-            self.conn.cache(x)?;
-
-            // Cache all the addrs except the selected ones
-            self.conn.cache_all(s.difference(&s_rm).copied())?;
-
-            // Measure latency.
-            let lat = self.conn.time_access(x)?;
-
-            // Determine whether `x` got evicted by a reduced set S\S_rm
-            if self.classifier.is_miss(lat) {
-                self.classifier.record(CacheTiming::Miss(lat));
-
+            if self.check_evicts(s.iter().filter(|x| !s_rm.contains(x)).copied(), x)? {
                 // Truly remove S_rm from S
                 s.retain(|x| !s_rm.contains(x));
 
                 // During the next step we will try to remove 10 more addrs
                 n += 10;
             } else {
-                self.classifier.record(CacheTiming::Hit(lat));
                 // We removed too much
-                if n > 0 {
-                    n -= 1;
-                }
-            }
-
-            // Stop when the size of the set equals the size of a cache set
-            if s.len() == self.params.n_lines {
-                return Ok(());
+                n -= 1;
             }
         }
+
+        if n == 0 {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "ERROR: Forward selection provided faulty data, which caused backward selection to fail"
+            ));
+        }
+
+        while s.len() > self.params.n_lines {
+            let rm_addr = s.iter().copied().choose(&mut rand::thread_rng()).unwrap();
+
+            if self.check_evicts(s.iter().filter(|&&x| x != rm_addr).copied(), x)? {
+                // Truly remove S_rm from S
+                s.remove(&rm_addr);
+            }
+        }
+
+        if s.len() < self.params.n_lines {
+            return Err(Error::new(
+                ErrorKind::Other,
+                "ERROR: Set shrunk too much during backwards selection",
+            ));
+        }
+
+        return Ok(());
     }
 
     fn cleanup(&mut self, s: &EvictionSet) -> Result<()> {
@@ -463,22 +474,12 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
         // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
         // TODO this is an antipattern. Should avoid that
-        let addrs: HashSet<usize> = self.addrs.iter().copied().collect();
+        let addrs: Vec<usize> = self.addrs.iter().copied().collect();
 
         for x in addrs.into_iter() {
-            // bring x into cache
-            self.conn.cache(x)?;
-
-            // potentially read x from the main memory
-            self.conn.cache_all(s.iter().copied())?;
-            let lat = self.conn.time_access(x)?;
-
-            // If we really evicted `x`, then `lat` is a cache miss. Then we do not need `x` anymore
-            if self.classifier.is_miss(lat) {
-                self.classifier.record(CacheTiming::Miss(lat));
+            // If `x` is evicted by our new cache set, then we do not need it anymore
+            if self.check_evicts(s.iter().copied(), x)? {
                 self.addrs.remove(&x);
-            } else {
-                self.classifier.record(CacheTiming::Hit(lat));
             }
         }
 

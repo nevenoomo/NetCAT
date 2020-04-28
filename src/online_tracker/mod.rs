@@ -264,7 +264,6 @@ where
                 for &colored_set_code in set_codes.iter() {
                     let set_code = SetCode(color_code, colored_set_code);
                     self.rpp.prime(&set_code)?;
-                    // DEBUG this causes connection refused error
                     self.sender.send_packet()?;
                     self.sender.send_packet()?;
                     if self.rpp.probe(&set_code)?.is_activated() {
