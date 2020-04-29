@@ -88,7 +88,7 @@ fn app_cli_config<'a, 'b>() -> App<'a, 'b> {
             Arg::with_name("custom_cache")
                 .help("Gives concrete parameters of the victim's LLC, if the predifined are not enough")
                 .long("custom_params")
-                .value_names(&["BYTES_PER_LINE", "ASSOCIATIVITY", "CACHE_SIZE_BYTES"])
+                .value_names(&["BYTES_PER_LINE", "ASSOCIATIVITY", "CACHE_SIZE_BYTES", "NUM_OF_ADDRS"])
                 .required_if("cache_description", "custom")
                 .validator(|s| match s.parse::<usize>() {
                     Ok(_) => Ok(()),
@@ -133,7 +133,8 @@ mod uninteractive {
                 let bytes_per_line = vals.next().unwrap().parse().unwrap();
                 let lines_per_set = vals.next().unwrap().parse().unwrap();
                 let cache_size = vals.next().unwrap().parse().unwrap();
-                CacheParams::new(bytes_per_line, lines_per_set, cache_size)
+                let num_addrs = vals.next().unwrap().parse().unwrap();
+                CacheParams::new(bytes_per_line, lines_per_set, cache_size, num_addrs)
             }
             _ => panic!("Unsupported value"),
         };
@@ -346,7 +347,16 @@ mod interactive {
             .interact()
             .unwrap();
 
-        CacheParams::new(bytes_per_line, lines_per_set, cache_size)
+        let addr_num = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("How many addresses needed to create eviction sets")
+            .validate_with(|x: &str| match x.parse::<usize>() {
+                Ok(_) => Ok(()),
+                Err(_) => Err(String::from("Must be a number")),
+            })
+            .interact()
+            .unwrap();
+
+        CacheParams::new(bytes_per_line, lines_per_set, cache_size, addr_num)
     }
 
     fn do_measurements<S, C>(sender: S, conn: C)

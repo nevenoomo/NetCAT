@@ -111,11 +111,13 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
         let mut rpp = Rpp {
             colored_sets: ColoredSets::with_capacity(params.n_colors),
-            params,
             conn,
-            addrs: (0usize..ADDR_NUM).map(|x| x * PAGE_SIZE).collect(), // here we collect page aligned (e.i. at the begining of the page) addresses
+            addrs: (0usize..params.v_buf / PAGE_SIZE)
+            .map(|x| x * PAGE_SIZE)
+            .collect(), // here we collect page aligned (e.i. at the begining of the page) addresses
             classifier,
             quite,
+            params,
         };
         rpp.build_sets();
 

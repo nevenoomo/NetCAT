@@ -1,11 +1,11 @@
+use dialoguer::{theme::ColorfulTheme, Input};
 use ibverbs;
 use netcat::connection::rdma::RdmaPrimitive;
-use netcat::rpp::{ADDR_NUM, PAGE_SIZE};
+use netcat::rpp::PAGE_SIZE;
 use std::env;
 use std::io::Error;
 use std::net;
 
-const BUF_SIZE: usize = PAGE_SIZE * ADDR_NUM; // 8 MB
 const ADDR_KEY: &str = "RDMA_ADDR";
 
 fn get_devs() -> ibverbs::DeviceList {
@@ -26,6 +26,17 @@ fn fork_init() {
 }
 
 fn main() {
+    let addr_num: usize = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("How many addresses needed to create eviction sets")
+        .validate_with(|x: &str| match x.parse::<usize>() {
+            Ok(_) => Ok(()),
+            Err(_) => Err(String::from("Must be a number")),
+        })
+        .interact()
+        .unwrap();
+
+    let buf_size = addr_num * PAGE_SIZE;
+
     fork_init();
     let dev_list = get_devs();
 
@@ -56,7 +67,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("ERROR: creating Completion Queue failed: {}", e));
 
     // here we need to allocate memory and register a memory region just for RDMA porposes
-    let mut mr = pd.allocate::<RdmaPrimitive>(BUF_SIZE).unwrap_or_else(|e| {
+    let mut mr = pd.allocate::<RdmaPrimitive>(buf_size).unwrap_or_else(|e| {
         panic!("ERROR: registering Memory Region failed: {}", e);
     });
 
