@@ -21,7 +21,6 @@ use timing_classif::{CacheTiming, TimingClassifier};
 const DELTA: usize = 5;
 const TIMINGS_INIT_FILL: usize = 150;
 const TIMING_REFRESH_FILL: usize = 50;
-const TIMING_REFRESH_RATE: usize = 7;
 const CTL_BIT: usize = 6; // 6 - 12 (lower bits - lower val)
 
 pub type Contents = u8;
@@ -125,8 +124,8 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
     /// Primes the given set of addresses
     pub fn prime(&mut self, set_code: &SetCode) -> Result<()> {
-        let addrs = self.colored_sets[set_code.0][set_code.1].clone();
-        self.conn.cache_all(addrs.into_iter())
+        self.conn
+            .cache_all(self.colored_sets[set_code.0][set_code.1].iter().copied())
     }
 
     /// Probes the given set of addresses. Returns true if a set activation detected
@@ -185,19 +184,17 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
                 .expect("Failed to time cache access");
 
             // we expect the latency from main memory to be bigger that from LLC
-            if hit_time > miss_time {
-                continue;
+            if hit_time < miss_time {
+                self.classifier.record(CacheTiming::Hit(hit_time));
+                self.classifier.record(CacheTiming::Miss(miss_time));
             }
-
-            self.classifier.record(CacheTiming::Hit(hit_time));
-            self.classifier.record(CacheTiming::Miss(miss_time));
         }
     }
 
     fn build_sets(&mut self) {
         let ok = style("OK").green().to_string();
         // We will have to profile this much pages. Only so many fit into the cache
-        let pages_to_profile = self.params.n_sets / self.params.n_sets_per_page;
+        let pages_to_profile = self.params.n_colors;
 
         if !self.quite {
             eprintln!("Building sets: {}", style("STARTED").green())
@@ -219,14 +216,6 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         while self.colored_sets.len() < pages_to_profile {
             match self.build_set() {
                 Ok(set) => {
-                    match self.is_unique(&set) {
-                        Ok(false) => continue,
-                        Err(e) if !self.quite => {
-                            pb.set_message(style(e).red().to_string().as_str())
-                        }
-                        _ => (),
-                    }
-
                     self.add_sets(set);
 
                     if !self.quite {
@@ -461,14 +450,12 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
     fn cleanup(&mut self, s: &EvictionSet) -> Result<()> {
         const VERIFICATION_TIMES: usize = 5;
-        const REMOVE_LIMIT: usize = 100;
 
         // First we remove addr in set `S` from global addr pool
         self.addrs.retain(|x| !s.contains(x));
 
         // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
         let addrs: Vec<usize> = self.addrs.clone();
-        let mut removed: usize = 0;
 
         // We will have to manually update index to take removed values into account.
         let mut idx = 0;
@@ -487,13 +474,8 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
                 // Remove value at index. We do not need to update `idx` as the next val will have the same
                 // index as we removed the current.
                 self.addrs.remove(idx);
-                removed += 1;
             } else {
                 idx += 1;
-            }
-
-            if removed > REMOVE_LIMIT {
-                return Ok(());
             }
         }
 

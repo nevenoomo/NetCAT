@@ -88,7 +88,7 @@ fn app_cli_config<'a, 'b>() -> App<'a, 'b> {
             Arg::with_name("custom_cache")
                 .help("Gives concrete parameters of the victim's LLC, if the predifined are not enough")
                 .long("custom_params")
-                .value_names(&["BYTES_PER_LINE", "ASSOCIATIVITY", "CACHE_SIZE_BYTES", "NUM_OF_ADDRS"])
+                .value_names(&["BYTES_PER_LINE", "ASSOCIATIVITY", "REACHABLE_LINES", "CACHE_SIZE_BYTES", "NUM_OF_ADDRS"])
                 .required_if("cache_description", "custom")
                 .validator(|s| match s.parse::<usize>() {
                     Ok(_) => Ok(()),
@@ -132,9 +132,16 @@ mod uninteractive {
                 let mut vals = args.values_of("custom_cache").unwrap();
                 let bytes_per_line = vals.next().unwrap().parse().unwrap();
                 let lines_per_set = vals.next().unwrap().parse().unwrap();
+                let reachable_lines = vals.next().unwrap().parse().unwrap();
                 let cache_size = vals.next().unwrap().parse().unwrap();
                 let num_addrs = vals.next().unwrap().parse().unwrap();
-                CacheParams::new(bytes_per_line, lines_per_set, cache_size, num_addrs)
+                CacheParams::new(
+                    bytes_per_line,
+                    lines_per_set,
+                    reachable_lines,
+                    cache_size,
+                    num_addrs,
+                )
             }
             _ => panic!("Unsupported value"),
         };
@@ -252,7 +259,7 @@ mod uninteractive {
 
 mod interactive {
     use console::style;
-    use dialoguer::{theme::ColorfulTheme, Confirmation, Input, Select};
+    use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
     use netcat::connection::local::{LocalMemoryConnector, LocalPacketSender};
     use netcat::connection::rdma::{RdmaServerConnector, RemotePacketSender};
     use netcat::connection::{CacheConnector, PacketSender};
@@ -338,6 +345,15 @@ mod interactive {
             .interact()
             .unwrap();
 
+        let reachable_lines: usize = Input::with_theme(&ColorfulTheme::default())
+            .with_prompt("How many lines can be reached [nearly 2 for DDIO]")
+            .validate_with(|x: &str| match x.parse::<usize>() {
+                Ok(_) => Ok(()),
+                Err(_) => Err(String::from("Must be a number")),
+            })
+            .interact()
+            .unwrap();
+
         let cache_size: usize = Input::with_theme(&ColorfulTheme::default())
             .with_prompt("Size of the cache in bytes")
             .validate_with(|x: &str| match x.parse::<usize>() {
@@ -356,7 +372,13 @@ mod interactive {
             .interact()
             .unwrap();
 
-        CacheParams::new(bytes_per_line, lines_per_set, cache_size, addr_num)
+        CacheParams::new(
+            bytes_per_line,
+            lines_per_set,
+            reachable_lines,
+            cache_size,
+            addr_num,
+        )
     }
 
     fn do_measurements<S, C>(sender: S, conn: C)
@@ -481,8 +503,8 @@ mod interactive {
     }
 
     fn should_continue() -> bool {
-        Confirmation::new()
-            .with_text("Do you want to continue?")
+        Confirm::new()
+            .with_prompt("Do you want to continue?")
             .default(true)
             .show_default(true)
             .interact()
