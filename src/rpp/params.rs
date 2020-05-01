@@ -4,21 +4,21 @@ pub static XEON_E5: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 20,
     cache_size: 20_971_520, // 20 MiB
-    addr_num: 60000,
+    addr_num: 40000,
 };
 
 pub static XEON_E5_DDIO: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 2,
     cache_size: 20_971_520, // 20 MiB
-    addr_num: 60000,
+    addr_num: 40000,
 };
 
 pub static CORE_I7: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 12,
     cache_size: 6_291_456, // 6 MiB
-    addr_num: 15000,
+    addr_num: 10000,
 };
 
 // This is for testing, i7 has no DDIO
@@ -26,21 +26,21 @@ pub static CORE_I7_DDIO: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 2,
     cache_size: 6_291_456, // 6 MiB
-    addr_num: 15000,
+    addr_num: 10000,
 };
 
 pub static XEON_PLATINUM: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 11,
     cache_size: 34_603_008, // 33 MiB
-    addr_num: 90000,
+    addr_num: 60000,
 };
 
 pub static XEON_PLATINUM_DDIO: CacheParams = CacheParams {
     bytes_per_line: 64,
     lines_per_set: 2,
     cache_size: 34_603_008, // 33 MiB
-    addr_num: 90000,
+    addr_num: 60000,
 };
 
 /// Parameters for Remote PRIME+PROBE.

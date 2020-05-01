@@ -1,7 +1,6 @@
 //! # Remote PRIME+PROBE
 //! This module is responsible for implementing PRIME+PROBE method of cache activity tracking.
 //! The method is described in _NetCAT: Practical Cache Attacks from the Network_.
-#![allow(dead_code)]
 
 pub mod params;
 mod timing_classif;
@@ -11,18 +10,19 @@ use console::style;
 use indicatif;
 pub use params::*;
 use rand;
-use rand::seq::IteratorRandom;
+use rand::seq::{IteratorRandom, SliceRandom};
 use serde::{Deserialize, Serialize};
 use std::cmp::min;
-use std::collections::{BTreeSet, HashSet};
 use std::io::Result;
 use std::io::{Error, ErrorKind};
 use std::iter::FromIterator;
 use timing_classif::{CacheTiming, TimingClassifier};
 
-pub const DELTA: usize = 5;
-pub const TIMINGS_INIT_FILL: usize = 100;
-pub const TIMING_REFRESH_RATE: usize = 100;
+const DELTA: usize = 5;
+const TIMINGS_INIT_FILL: usize = 150;
+const TIMING_REFRESH_FILL: usize = 50;
+const TIMING_REFRESH_RATE: usize = 7;
+const CTL_BIT: usize = 6; // 6 - 12 (lower bits - lower val)
 
 pub type Contents = u8;
 
@@ -41,7 +41,7 @@ macro_rules! median {
 
 /// # EvictionSet
 /// EvictionSet
-pub type EvictionSet = HashSet<Address>;
+pub type EvictionSet = Vec<Address>;
 
 /// A custom code, representing one page color
 pub type ColorCode = usize;
@@ -52,7 +52,6 @@ pub type ColoredSetCode = usize;
 #[derive(Copy, Clone, Default, Debug, PartialOrd, PartialEq, Eq, Ord, Serialize, Deserialize)]
 pub struct SetCode(pub ColorCode, pub ColoredSetCode);
 
-type SetsKey = BTreeSet<Address>;
 type EvictionSets = Vec<EvictionSet>;
 // a mapping from the color code to the eviction sets, corresponding to this color
 // when we find a new set, consisting of page aligned addresses starting at the beginning of the page
@@ -90,7 +89,7 @@ pub struct Rpp<C> {
     params: RppParams,
     conn: C,
     colored_sets: ColoredSets, // maps a color code to sets
-    addrs: HashSet<Address>,
+    addrs: Vec<Address>,
     classifier: TimingClassifier, // we will be using this to dynamically scale threshold
     quite: bool,
 }
@@ -113,8 +112,8 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             colored_sets: ColoredSets::with_capacity(params.n_colors),
             conn,
             addrs: (0usize..params.v_buf / PAGE_SIZE)
-            .map(|x| x * PAGE_SIZE)
-            .collect(), // here we collect page aligned (e.i. at the begining of the page) addresses
+                .map(|x| x * PAGE_SIZE)
+                .collect(), // here we collect page aligned (e.i. at the begining of the page) addresses
             classifier,
             quite,
             params,
@@ -165,16 +164,11 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         set_codes.iter().map(|x| self.probe(x)).collect()
     }
 
-    fn train_classifier(&mut self) {
+    fn train_classifier(&mut self, sampls_num: usize) {
         // we assume that the memory region is not cached
         let mut rng = rand::thread_rng();
 
-        for ofs in self
-            .addrs
-            .iter()
-            .copied()
-            .choose_multiple(&mut rng, TIMINGS_INIT_FILL)
-        {
+        for &ofs in self.addrs.as_slice().choose_multiple(&mut rng, sampls_num) {
             // here we read from the main memory
             let miss_time = self
                 .conn
@@ -200,79 +194,68 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         }
     }
 
-    pub fn profiled(&self) -> usize {
-        self.colored_sets.iter().map(|v| v.len()).sum()
-    }
-
     fn build_sets(&mut self) {
+        let ok = style("OK").green().to_string();
+        // We will have to profile this much pages. Only so many fit into the cache
+        let pages_to_profile = self.params.n_sets / self.params.n_sets_per_page;
+
         if !self.quite {
             eprintln!("Building sets: {}", style("STARTED").green())
         }
         self.conn.reserve(self.params.v_buf);
-        self.train_classifier();
+        self.train_classifier(TIMINGS_INIT_FILL);
 
-        let pb = indicatif::ProgressBar::new(self.params.n_sets as u64);
+        let pb = indicatif::ProgressBar::new(pages_to_profile as u64);
 
         if !self.quite {
             pb.set_style(
                 indicatif::ProgressStyle::default_bar()
-                    .template("{prefix:.bold} [{elapsed}] [{bar:40.cyan/blue}] {percent}% ({eta})")
+                    .template("({elapsed}:{eta}) [{bar:40.cyan/blue}] {percent}% {msg}")
                     .progress_chars("#>-"),
             );
-            pb.set_prefix("Building sets:");
+            pb.set_message(&ok);
         }
 
-        let mut err_cnt = 0;
-
-        while self.profiled() < self.params.n_sets {
+        while self.colored_sets.len() < pages_to_profile {
             match self.build_set() {
-                Ok(set) => self.check_set(set),
+                Ok(set) => {
+                    match self.is_unique(&set) {
+                        Ok(false) => continue,
+                        Err(e) if !self.quite => {
+                            pb.set_message(style(e).red().to_string().as_str())
+                        }
+                        _ => (),
+                    }
+
+                    self.add_sets(set);
+
+                    if !self.quite {
+                        pb.inc(1);
+                        pb.set_message(&ok);
+                    }
+                }
                 Err(e) => {
                     if !self.quite {
                         match e.kind() {
                             ErrorKind::UnexpectedEof => panic!("{}", style(e).red()),
                             ErrorKind::InvalidInput => (),
-                            _ => eprintln!("{}", style(e).red()),
+                            _ => pb.set_message(style(e).red().to_string().as_str()),
                         }
                     }
-                    // If case of error we retrain the classifier to ensure correct timings
-                    if err_cnt > TIMING_REFRESH_RATE {
-                        // Something really bad happened. Need to refresh data.
-                        err_cnt = 0;
-                        self.classifier.clear();
+                    // stop training if the num of addrs is too small
+                    if self.addrs.len() > 500 {
+                        self.train_classifier(TIMING_REFRESH_FILL);
                     }
-
-                    self.train_classifier();
-                    err_cnt += 1;
                 }
-            }
-            if !self.quite {
-                pb.set_position(self.profiled() as u64);
             }
         }
 
         if !self.quite {
-            pb.finish_and_clear();
-            eprintln!("Building sets: {}", style("FINISHED").green());
+            pb.finish_with_message(style("FINISHED").green().to_string().as_str());
         }
     }
 
-    fn check_set(&mut self, set: EvictionSet) {
-        match self.is_unique(&set, 0) {
-            Ok(u) if !u => return,
-            Err(e) if !self.quite => {
-                eprintln!("{}", style(e).red());
-                return;
-            }
-            _ => (),
-        }
-        if let Err(e) = self.add_sets(set) {
-            if !self.quite {
-                eprintln!("{}", style(e).red());
-            }
-        }
-    }
-
+    /// Checks, whether the given set evicts an address
     fn check_evicts<I: Iterator<Item = Address>>(&mut self, set: I, addr: Address) -> Result<bool> {
         // bring `addr` into cache
         self.conn.cache(addr)?;
@@ -285,16 +268,13 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
         // it should be a miss
         if self.classifier.is_miss(lat) {
-            self.classifier.record(CacheTiming::Miss(lat));
             return Ok(true);
         }
 
-        self.classifier.record(CacheTiming::Hit(lat));
         Ok(false)
     }
 
     // this step might fails only due to read & write fails. read and write fail only as the last resort
-    // TODO this may halt forever
     fn build_set(&mut self) -> Result<EvictionSet> {
         let (mut s, x) = self.forward_selection()?;
         self.backward_selection(&mut s, x)?;
@@ -303,8 +283,8 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         Ok(s)
     }
 
-    fn add_sets(&mut self, set: EvictionSet) -> Result<()> {
-        const CTL_BIT: usize = 6; // 6 - 12 (lower bits - lower val)
+    /// Adds the given set and derived set for the same color (page)
+    fn add_sets(&mut self, set: EvictionSet) {
         const NUM_VARIANTS: usize = 64; // bits 12 - 6 determine the cache set. We have 2^6 = 64 options to change those
 
         // this vector corresponds to the new color which we have profiled
@@ -320,51 +300,55 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
         // Finally, we record a new color
         self.colored_sets.push(sets);
-
-        Ok(())
     }
 
-    /// Check whether a given set is unique
+    /// Check whether a given set with is unique
     /// Will test it against all other sets with different colors
-    /// **and addresses with bits 6-12 equal to `idx`**. This is
+    /// **and addresses with bits 6-12 equal to addrs from the given set**. This is
     /// the nessessary condition for them to interfere with each other.
-    fn is_unique(&mut self, set: &EvictionSet, idx: usize) -> Result<bool> {
+    fn is_unique(&mut self, set: &EvictionSet) -> Result<bool> {
         const REPEATING: usize = 5; // We will try for multiple times,
                                     // taking the most probable result
-        let mut unique = true;
+        let mut test_addrs = [0; REPEATING];
+
+        // Extract idx for the given set
+        let idx = set
+            .iter()
+            .next()
+            .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "Eviction set is empty"))?
+            & (0b111111 << CTL_BIT);
 
         // We need to check sets from vector inside `colored_sets` vector with the
         // given `idx`
-        for other_set in self.colored_sets.iter().map(|v| &v[idx]) {
-            let mut score = 0;
-            for _ in 0..REPEATING {
-                // Taking a random addr from the other set
-                let test_addr = *other_set.iter().choose(&mut rand::thread_rng()).unwrap();
+        let colors = self.colored_sets.len();
 
-                // Bring it into the cache
-                self.conn.cache(test_addr)?;
+        for color in 0..colors {
+            let mut score = 0; // the more - the better
+            let other_set = &self.colored_sets[color][idx];
+            // Taking random testing addrs from the other set
+            for test_addr in (&mut test_addrs[..]).iter_mut() {
+                *test_addr = *other_set
+                    .as_slice()
+                    .choose(&mut rand::thread_rng())
+                    .unwrap();
+            }
 
-                // Now cache all addrs from the tested set
-                // If the set is unique, then it will fill **another cache set** and not
-                // evict `test_addr`
-                self.conn.cache_all(set.iter().copied())?;
-
-                // We expect this to be a cache hit, as our new set is unique and
-                // cover a **completely different** cache set
-                let lat = self.conn.time_access(test_addr)?;
-
-                if self.classifier.is_hit(lat) {
-                    score += 1;
-                } else {
+            for &test_addr in (&test_addrs[..]).iter() {
+                // If evicts then the new set is not unique, it falls into the same cache set
+                if self.check_evicts(set.iter().copied(), test_addr)? {
                     score -= 1;
+                } else {
+                    score += 1;
                 }
             }
 
             // We consider the most probable result to be true
-            unique = unique && score > 0;
+            if score <= 0 {
+                return Ok(false);
+            }
         }
 
-        Ok(unique)
+        Ok(true)
     }
 
     fn forward_selection(&mut self) -> Result<(EvictionSet, Address)> {
@@ -378,7 +362,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             let mut max_lat = 0;
             let mut max_idx = 0;
 
-            let mut sub_set: Vec<Address> = self.addrs.iter().copied().take(n).collect();
+            let mut sub_set: Vec<Address> = (&self.addrs[..n]).to_vec();
 
             // Walk over all the addrs of a selected subset and finding the address with the maximum latency
             for (i, &addr) in sub_set.iter().enumerate() {
@@ -452,11 +436,16 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         }
 
         while s.len() > self.params.n_lines {
-            let rm_addr = s.iter().copied().choose(&mut rand::thread_rng()).unwrap();
+            let (idx, rm_addr) = s
+                .iter()
+                .copied()
+                .enumerate()
+                .choose(&mut rand::thread_rng())
+                .unwrap();
 
             if self.check_evicts(s.iter().filter(|&&x| x != rm_addr).copied(), x)? {
                 // Truly remove S_rm from S
-                s.remove(&rm_addr);
+                s.remove(idx);
             }
         }
 
@@ -471,17 +460,40 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     }
 
     fn cleanup(&mut self, s: &EvictionSet) -> Result<()> {
+        const VERIFICATION_TIMES: usize = 5;
+        const REMOVE_LIMIT: usize = 100;
+
         // First we remove addr in set `S` from global addr pool
         self.addrs.retain(|x| !s.contains(x));
 
         // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
-        // TODO this is an antipattern. Should avoid that
-        let addrs: Vec<usize> = self.addrs.iter().copied().collect();
+        let addrs: Vec<usize> = self.addrs.clone();
+        let mut removed: usize = 0;
 
-        for x in addrs.into_iter() {
+        // We will have to manually update index to take removed values into account.
+        let mut idx = 0;
+        for x in addrs {
+            let mut score = 0;
+            for _ in 0..VERIFICATION_TIMES {
+                if self.check_evicts(s.iter().copied(), x)? {
+                    score += 1;
+                } else {
+                    score -= 1;
+                }
+            }
+
             // If `x` is evicted by our new cache set, then we do not need it anymore
-            if self.check_evicts(s.iter().copied(), x)? {
-                self.addrs.remove(&x);
+            if score > 0 {
+                // Remove value at index. We do not need to update `idx` as the next val will have the same
+                // index as we removed the current.
+                self.addrs.remove(idx);
+                removed += 1;
+            } else {
+                idx += 1;
+            }
+
+            if removed > REMOVE_LIMIT {
+                return Ok(());
             }
         }
 
