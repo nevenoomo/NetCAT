@@ -474,8 +474,12 @@ mod interactive {
                 eprintln!("Online Tracker: {}", style(e).red());
                 not_init = should_continue();
             } else {
-                not_init = false;
+                break;
             }
+        }
+
+        if !not_init {
+            panic!("{}", style("Could not initialize OnlineTracker").red());
         }
 
         let mut not_done = true;

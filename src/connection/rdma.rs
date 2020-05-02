@@ -347,12 +347,22 @@ impl CacheConnector for RdmaServerConnector {
     fn cache(&mut self, addr: Address) -> Result<()> {
         // we do not really care of the contents of the MR
         // as the writen value will not be used
-        self.write_from_mr(addr)
+        self.write_from_mr(addr).map_err(|e| {
+            Error::new(
+                ErrorKind::NotConnected,
+                format!("ERROR: Could not cache address: {}", e),
+            )
+        })
     }
 
     #[inline(always)]
     fn time_access(&mut self, addr: Address) -> Result<Time> {
-        self.read_timed(addr).map(|(_, t)| t)
+        self.read_timed(addr).map(|(_, t)| t).map_err(|e| {
+            Error::new(
+                ErrorKind::NotConnected,
+                format!("ERROR: Could not time access: {}", e),
+            )
+        })
     }
 }
 
@@ -365,10 +375,9 @@ impl RemotePacketSender {
     pub fn new<A: ToSocketAddrs>(addr: A) -> Result<RemotePacketSender> {
         // We do it this way and not by `connection` method be able to send to
         // closed ports (with connection we would get ICMP back and fail next time)
-        let sock_addr = addr.to_socket_addrs()?.next().ok_or_else(|| Error::new(
-            ErrorKind::InvalidData,
-            "ERROR: could not resolve address.",
-        ))?;
+        let sock_addr = addr.to_socket_addrs()?.next().ok_or_else(|| {
+            Error::new(ErrorKind::InvalidData, "ERROR: could not resolve address.")
+        })?;
 
         // Allow the machine to automatically choose port for us
         let sock = UdpSocket::bind("0.0.0.0:0").map_err(|e| {
@@ -377,13 +386,7 @@ impl RemotePacketSender {
                 format!("ERROR: could not bind to address: {}", e),
             )
         })?;
-
-        sock.set_nonblocking(true).map_err(|e| {
-            Error::new(
-                ErrorKind::ConnectionRefused,
-                format!("ERROR: Could not set non blocking: {}", e),
-            )
-        })?;
+        // MAYBE set nonblocking
 
         Ok(RemotePacketSender { sock, sock_addr })
     }
@@ -392,7 +395,12 @@ impl RemotePacketSender {
 impl PacketSender for RemotePacketSender {
     #[inline(always)]
     fn send_packet(&mut self) -> Result<()> {
-        self.sock.send_to(&[0], self.sock_addr)?;
+        self.sock.send_to(&[0], self.sock_addr).map_err(|e| {
+            Error::new(
+                ErrorKind::NotConnected,
+                format!("ERROR: Cannot send packet: {}", e),
+            )
+        })?;
         Ok(())
     }
 }
