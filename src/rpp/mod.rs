@@ -7,20 +7,16 @@ mod timing_classif;
 
 use crate::connection::{Address, CacheConnector, Time};
 use console::style;
-use indicatif;
 pub use params::*;
-use rand;
-use rand::seq::{IteratorRandom, SliceRandom};
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
-use std::cmp::min;
 use std::io::Result;
 use std::io::{Error, ErrorKind};
-use std::iter::FromIterator;
 use timing_classif::{CacheTiming, TimingClassifier};
 
-const DELTA: usize = 5;
 const TIMINGS_INIT_FILL: usize = 150;
 const TIMING_REFRESH_FILL: usize = 50;
+const RETRY_CNT: usize = 10;
 const CTL_BIT: usize = 6; // 6 - 12 (lower bits - lower val)
 
 pub type Contents = u8;
@@ -225,10 +221,16 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         }
 
         while self.colored_sets.len() < pages_to_profile {
-            match self.build_set_for_idx(0) {
+            match self.build_initial_set() {
                 Ok(set) => {
-                    self.add_sets(set);
-
+                    let mut err_cnt = 0;
+                    while let Err(e) = self.add_sets(&set) {
+                        err_cnt += 1;
+                        pb.set_message(style(e).red().to_string().as_str());
+                        if err_cnt > RETRY_CNT {
+                            panic!("{}", style("Failed to derive sets").red());
+                        }
+                    }
                     if !self.quite {
                         pb.inc(1);
                         pb.set_message(&ok);
@@ -275,17 +277,24 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         Ok(false)
     }
 
+    fn build_initial_set(&mut self) -> Result<EvictionSet> {
+        let addr = *self.addrs[0]
+            .choose(&mut rand::thread_rng())
+            .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, "ERROR: No addrs left"))?;
+        self.build_set_for_idx_addr(0, addr)
+    }
+
     // this step might fails only due to read & write fails. read and write fail only as the last resort
-    fn build_set_for_idx(&mut self, idx: usize) -> Result<EvictionSet> {
-        let (mut s, x) = self.forward_selection(idx)?;
-        self.backward_selection(&mut s, x)?;
+    fn build_set_for_idx_addr(&mut self, idx: usize, addr: Address) -> Result<EvictionSet> {
+        let mut s = self.forward_selection(idx, addr)?;
+        self.backward_selection(&mut s, addr)?;
         self.cleanup(&s, idx)?;
 
         Ok(s)
     }
 
     /// Adds the given set and derived set for the same color (page)
-    fn add_sets(&mut self, set: EvictionSet) {
+    fn add_sets(&mut self, set: &EvictionSet) -> Result<()> {
         const NUM_VARIANTS: usize = 64; // bits 12 - 6 determine the cache set. We have 2^6 = 64 options to change those
 
         // this vector corresponds to the new color which we have profiled
@@ -293,14 +302,28 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         // other sets for pages with the same color will not pass the uniqueness check
         let mut sets = Vec::with_capacity(self.params.n_sets_per_page);
         sets.push(set.clone());
+
         for i in 1..NUM_VARIANTS {
-            // We construct 64 new sets given one
-            let new_set = set.iter().copied().map(|x| x ^ (i << CTL_BIT)).collect(); // xor all options with addrs from the given set
-            sets.push(new_set);
+            for addr in set.iter().copied().map(|x| x ^ (i << CTL_BIT)) {
+                let new_set = match self.build_set_for_idx_addr(i, addr) {
+                    Ok(set) => set,
+                    Err(_) => continue,
+                };
+                sets.push(new_set);
+                break;
+            }
+            if sets.len() != i + 1 {
+                return Err(Error::new(
+                    ErrorKind::NotFound,
+                    "Error: could not derive sets",
+                ));
+            }
         }
 
         // Finally, we record a new color
         self.colored_sets.push(sets);
+
+        Ok(())
     }
 
     /// Check whether a given set with is unique
@@ -352,7 +375,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         Ok(true)
     }
 
-    fn forward_selection(&mut self, idx: usize) -> Result<(EvictionSet, Address)> {
+    fn forward_selection(&mut self, idx: usize, addr: Address) -> Result<EvictionSet> {
         // TODO this should dynamic
         let mut n = 100;
         if self.addrs[idx].len() < self.params.n_lines + 1 {
@@ -361,23 +384,10 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         let total_addrs = self.addrs[idx].len();
 
         while n <= total_addrs {
-            let mut max_lat = 0;
-            let mut max_addr = 0;
+            let sub_set: Vec<Address> = self.addrs[idx][..n].iter().copied().collect();
 
-            let mut sub_set = &self.addrs[idx][..n];
-
-            // Walk over all the addrs of a selected subset and finding the address with the maximum latency
-            for &addr in sub_set.iter() {
-                let lat = self.conn.time_access(addr)?;
-                if lat > max_lat {
-                    max_lat = lat;
-                    max_addr = addr;
-                }
-            }
-
-            // we could just check, that max_lat is a cache miss
-            if self.classifier.is_miss(max_lat) {
-                return Ok((sub_set.to_vec(), max_addr));
+            if self.check_evicts(sub_set.iter().copied(), addr)? {
+                return Ok(sub_set);
             }
 
             n += 1;
@@ -385,7 +395,6 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
         // Here we excided the number of addrs, but registered no eviction
         // We remove the faulty address not to cause more issues
-        // MAYBE remove address, which we could not evict?
         Err(Error::new(
             ErrorKind::Other,
             "ERROR: cannot build set for the chosen address.",
@@ -435,7 +444,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             }
         }
 
-        return Ok(());
+        Ok(())
     }
 
     fn cleanup(&mut self, s: &EvictionSet, idx: usize) -> Result<()> {

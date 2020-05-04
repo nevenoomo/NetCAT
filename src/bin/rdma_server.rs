@@ -1,5 +1,4 @@
 use dialoguer::{theme::ColorfulTheme, Input};
-use ibverbs;
 use netcat::connection::rdma::RdmaPrimitive;
 use netcat::rpp::PAGE_SIZE;
 use std::env;

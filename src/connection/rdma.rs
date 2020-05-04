@@ -2,8 +2,6 @@
 //! This module is responsible for RDMA connections and maintaining overall RDMA state
 #![allow(dead_code)]
 use crate::connection::{Address, CacheConnector, MemoryConnector, PacketSender, Time};
-use bincode;
-use ibverbs;
 use std::convert::TryInto;
 use std::io::{Error, ErrorKind, Result};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs, UdpSocket};
