@@ -87,8 +87,8 @@ pub type Latencies = Vec<Time>;
 pub struct Rpp<C> {
     params: RppParams,
     conn: C,
-    colored_sets: ColoredSets, // maps a color code to sets
-    addrs: Vec<Address>,
+    colored_sets: ColoredSets,    // maps a color code to sets
+    addrs: Vec<Vec<Address>>, // adress pools for each of the values of bits 12-6 of virtual addresses
     classifier: TimingClassifier, // we will be using this to dynamically scale threshold
     quite: bool,
 }
@@ -107,12 +107,20 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         let classifier = TimingClassifier::new();
         let params: RppParams = cparams.into();
 
+        // Fill in the address table (64 values of bits 12-6)
+        let mut addrs = Vec::with_capacity(64);
+        for i in 0..64 {
+            addrs.push(
+                (0usize..params.v_buf / PAGE_SIZE)
+                    .map(|x| (x * PAGE_SIZE) ^ (i << 6))
+                    .collect(),
+            );
+        }
+
         let mut rpp = Rpp {
             colored_sets: ColoredSets::with_capacity(params.n_colors),
             conn,
-            addrs: (0usize..params.v_buf / PAGE_SIZE)
-                .map(|x| x * PAGE_SIZE)
-                .collect(), // here we collect page aligned (e.i. at the begining of the page) addresses
+            addrs, // here we collect page aligned (e.i. at the begining of the page) addresses
             classifier,
             quite,
             params,
@@ -167,7 +175,10 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         // we assume that the memory region is not cached
         let mut rng = rand::thread_rng();
 
-        for &ofs in self.addrs.as_slice().choose_multiple(&mut rng, sampls_num) {
+        for &ofs in self.addrs[0]
+            .as_slice()
+            .choose_multiple(&mut rng, sampls_num)
+        {
             // here we read from the main memory
             let miss_time = self
                 .conn
@@ -214,7 +225,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         }
 
         while self.colored_sets.len() < pages_to_profile {
-            match self.build_set() {
+            match self.build_set_for_idx(0) {
                 Ok(set) => {
                     self.add_sets(set);
 
@@ -231,11 +242,12 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
                             _ => pb.set_message(style(e).red().to_string().as_str()),
                         }
                     }
-                    // stop training if the num of addrs is too small
-                    if self.addrs.len() > 500 {
-                        self.train_classifier(TIMING_REFRESH_FILL);
-                    }
                 }
+            }
+
+            // stop training if the num of addrs is too small
+            if self.addrs.len() > 500 {
+                self.train_classifier(TIMING_REFRESH_FILL);
             }
         }
 
@@ -264,10 +276,10 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     }
 
     // this step might fails only due to read & write fails. read and write fail only as the last resort
-    fn build_set(&mut self) -> Result<EvictionSet> {
-        let (mut s, x) = self.forward_selection()?;
+    fn build_set_for_idx(&mut self, idx: usize) -> Result<EvictionSet> {
+        let (mut s, x) = self.forward_selection(idx)?;
         self.backward_selection(&mut s, x)?;
-        self.cleanup(&s)?;
+        self.cleanup(&s, idx)?;
 
         Ok(s)
     }
@@ -340,34 +352,32 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         Ok(true)
     }
 
-    fn forward_selection(&mut self) -> Result<(EvictionSet, Address)> {
-        let mut n = self.params.n_lines + 1;
-        if self.addrs.len() < n {
+    fn forward_selection(&mut self, idx: usize) -> Result<(EvictionSet, Address)> {
+        // TODO this should dynamic
+        let mut n = 100;
+        if self.addrs[idx].len() < self.params.n_lines + 1 {
             return Err(Error::new(ErrorKind::UnexpectedEof, "ERROR: No addrs left"));
         }
-        let total_addrs = self.addrs.len();
+        let total_addrs = self.addrs[idx].len();
 
         while n <= total_addrs {
             let mut max_lat = 0;
-            let mut max_idx = 0;
+            let mut max_addr = 0;
 
-            let mut sub_set: Vec<Address> = (&self.addrs[..n]).to_vec();
+            let mut sub_set = &self.addrs[idx][..n];
 
             // Walk over all the addrs of a selected subset and finding the address with the maximum latency
-            for (i, &addr) in sub_set.iter().enumerate() {
+            for &addr in sub_set.iter() {
                 let lat = self.conn.time_access(addr)?;
                 if lat > max_lat {
                     max_lat = lat;
-                    max_idx = i;
+                    max_addr = addr;
                 }
             }
-            // `max_addr` is a candidate address
-            let max_addr = sub_set.swap_remove(max_idx);
 
-            if self.check_evicts(sub_set.iter().copied(), max_addr)? {
-                // From Vec to HashSet
-                let sub_set = EvictionSet::from_iter(sub_set.into_iter());
-                return Ok((sub_set, max_addr));
+            // we could just check, that max_lat is a cache miss
+            if self.classifier.is_miss(max_lat) {
+                return Ok((sub_set.to_vec(), max_addr));
             }
 
             n += 1;
@@ -383,6 +393,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     }
 
     // Here we assume that set `s` truly evicts address `x`
+    // here we use the approach proposed by Vila et al.
     fn backward_selection(&mut self, s: &mut EvictionSet, x: Address) -> Result<()> {
         if s.len() < self.params.n_lines {
             return Err(Error::new(
@@ -394,68 +405,47 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             return Ok(());
         }
 
-        let mut n = 1;
-        // Stop when the size of the set equals the size of a cache set
-        while s.len() > self.params.n_lines + DELTA && n > 0 {
-            // if S is relatively small, then we do not use step adjusting
-            n = min(n, s.len() >> 1); // >> 1 == / 2
-
-            let s_rm = s
-                .iter()
-                .copied()
-                .choose_multiple(&mut rand::thread_rng(), n);
-
-            if self.check_evicts(s.iter().filter(|x| !s_rm.contains(x)).copied(), x)? {
-                // Truly remove S_rm from S
-                s.retain(|x| !s_rm.contains(x));
-
-                // During the next step we will try to remove 10 more addrs
-                n += 10;
-            } else {
-                // We removed too much
-                n -= 1;
-            }
-        }
-
-        if n == 0 {
-            return Err(Error::new(
-                ErrorKind::InvalidInput,
-                "ERROR: Forward selection provided faulty data, which caused backward selection to fail"
-            ));
-        }
-
         while s.len() > self.params.n_lines {
-            let (idx, rm_addr) = s
-                .iter()
-                .copied()
-                .enumerate()
-                .choose(&mut rand::thread_rng())
-                .unwrap();
+            // we need n_lines + 1 chuncks
+            let chunk_len = s.len() / (self.params.n_lines + 1);
+            let mut idx = 0;
+            let mut fnd = false;
 
-            if self.check_evicts(s.iter().filter(|&&x| x != rm_addr).copied(), x)? {
-                // Truly remove S_rm from S
-                s.remove(idx);
+            // check, whether throwing out one of first `n_lines` chunks
+            // does not effect eviction
+            for _ in 0..self.params.n_lines {
+                let it = s[..idx].iter().chain(s[idx + chunk_len..].iter()).copied();
+
+                // check, whether we evict x without a selected chunk
+                if self.check_evicts(it, x)? {
+                    // we still evicted x => we do not need this chunk
+                    fnd = true;
+                    break;
+                }
+
+                idx += chunk_len;
             }
-        }
 
-        if s.len() < self.params.n_lines {
-            return Err(Error::new(
-                ErrorKind::Other,
-                "ERROR: Set shrunk too much during backwards selection",
-            ));
+            if !fnd {
+                // remove tailing chunk
+                s.drain(idx..);
+            } else {
+                // remove chunk with no useful data
+                s.drain(idx..idx + chunk_len);
+            }
         }
 
         return Ok(());
     }
 
-    fn cleanup(&mut self, s: &EvictionSet) -> Result<()> {
+    fn cleanup(&mut self, s: &EvictionSet, idx: usize) -> Result<()> {
         const VERIFICATION_TIMES: usize = 5;
 
         // First we remove addr in set `S` from global addr pool
-        self.addrs.retain(|x| !s.contains(x));
+        self.addrs[idx].retain(|x| !s.contains(x));
 
         // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
-        let addrs: Vec<usize> = self.addrs.clone();
+        let addrs: Vec<usize> = self.addrs[idx].clone();
 
         // We will have to manually update index to take removed values into account.
         let mut idx = 0;
