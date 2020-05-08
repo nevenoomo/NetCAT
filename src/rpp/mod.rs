@@ -376,14 +376,14 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     }
 
     fn forward_selection(&mut self, idx: usize, addr: Address) -> Result<EvictionSet> {
-        // TODO this should dynamic
-        let mut n = 100;
         if self.addrs[idx].len() < self.params.n_lines + 1 {
             return Err(Error::new(ErrorKind::UnexpectedEof, "ERROR: No addrs left"));
         }
         let total_addrs = self.addrs[idx].len();
+        
+        let mut n = std::cmp::max(total_addrs / 10, self.params.n_lines + 1);
 
-        while n <= total_addrs {
+        while n < total_addrs {
             let sub_set: Vec<Address> = self.addrs[idx][..n].iter().copied().collect();
 
             if self.check_evicts(sub_set.iter().copied(), addr)? {
