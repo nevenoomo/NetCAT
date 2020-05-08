@@ -281,27 +281,29 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
         let addr = *self.addrs[0]
             .choose(&mut rand::thread_rng())
             .ok_or_else(|| Error::new(ErrorKind::UnexpectedEof, "ERROR: No addrs left"))?;
-        self.build_set_for_idx_addr(0, addr)
+        let set = self.build_set_for_idx_addr(0, addr)?;
+        self.cleanup_congruent(&set, 0)?;
+        Ok(set)
     }
 
     // this step might fails only due to read & write fails. read and write fail only as the last resort
     fn build_set_for_idx_addr(&mut self, idx: usize, addr: Address) -> Result<EvictionSet> {
         let mut s = self.forward_selection(idx, addr)?;
         self.backward_selection(&mut s, addr)?;
-        self.cleanup(&s, idx)?;
+        self.remove_used_addrs(&s, idx);
 
         Ok(s)
     }
 
     /// Adds the given set and derived set for the same color (page)
-    fn add_sets(&mut self, set: &EvictionSet) -> Result<()> {
+    fn add_sets(&mut self, set: &[Address]) -> Result<()> {
         const NUM_VARIANTS: usize = 64; // bits 12 - 6 determine the cache set. We have 2^6 = 64 options to change those
 
         // this vector corresponds to the new color which we have profiled
         // one color corresponds to as much sets as there are on one page
         // other sets for pages with the same color will not pass the uniqueness check
         let mut sets = Vec::with_capacity(self.params.n_sets_per_page);
-        sets.push(set.clone());
+        sets.push(set.to_vec());
 
         for i in 1..NUM_VARIANTS {
             for addr in set.iter().copied().map(|x| x ^ (i << CTL_BIT)) {
@@ -330,7 +332,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     /// Will test it against all other sets with different colors
     /// **and addresses with bits 6-12 equal to addrs from the given set**. This is
     /// the nessessary condition for them to interfere with each other.
-    fn is_unique(&mut self, set: &EvictionSet) -> Result<bool> {
+    fn is_unique(&mut self, set: &[Address]) -> Result<bool> {
         const REPEATING: usize = 5; // We will try for multiple times,
                                     // taking the most probable result
         let mut test_addrs = [0; REPEATING];
@@ -350,14 +352,14 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
             let mut score = 0; // the more - the better
             let other_set = &self.colored_sets[color][idx];
             // Taking random testing addrs from the other set
-            for test_addr in (&mut test_addrs[..]).iter_mut() {
+            for test_addr in &mut test_addrs {
                 *test_addr = *other_set
                     .as_slice()
                     .choose(&mut rand::thread_rng())
                     .unwrap();
             }
 
-            for &test_addr in (&test_addrs[..]).iter() {
+            for &test_addr in &test_addrs {
                 // If evicts then the new set is not unique, it falls into the same cache set
                 if self.check_evicts(set.iter().copied(), test_addr)? {
                     score -= 1;
@@ -376,15 +378,15 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
     }
 
     fn forward_selection(&mut self, idx: usize, addr: Address) -> Result<EvictionSet> {
-        if self.addrs[idx].len() < self.params.n_lines + 1 {
+        let total_addrs = self.addrs[idx].len();
+
+        if total_addrs < self.params.n_lines + 1 {
             return Err(Error::new(ErrorKind::UnexpectedEof, "ERROR: No addrs left"));
         }
-        let total_addrs = self.addrs[idx].len();
-        
         let mut n = std::cmp::max(total_addrs / 10, self.params.n_lines + 1);
 
-        while n < total_addrs {
-            let sub_set: Vec<Address> = self.addrs[idx][..n].iter().copied().collect();
+        while n <= total_addrs {
+            let sub_set: Vec<Address> = self.addrs[idx][..n - 1].to_vec();
 
             if self.check_evicts(sub_set.iter().copied(), addr)? {
                 return Ok(sub_set);
@@ -435,46 +437,44 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
                 idx += chunk_len;
             }
 
-            if !fnd {
-                // remove tailing chunk
-                s.drain(idx..);
-            } else {
+            if fnd {
                 // remove chunk with no useful data
                 s.drain(idx..idx + chunk_len);
+            } else {
+                // remove tailing chunk
+                s.drain(idx..);
             }
         }
 
         Ok(())
     }
 
-    fn cleanup(&mut self, s: &EvictionSet, idx: usize) -> Result<()> {
-        const VERIFICATION_TIMES: usize = 5;
+    #[inline(always)]
+    fn cleanup_full(&mut self, s: &[Address], idx: usize) -> Result<()> {
+        self.remove_used_addrs(s, idx);
+        self.cleanup_congruent(s, idx)
+    }
 
-        // First we remove addr in set `S` from global addr pool
+    #[inline(always)]
+    fn remove_used_addrs(&mut self, s: &[Address], idx: usize) {
+        // Remove addrs in set `S` from global addr pool
         self.addrs[idx].retain(|x| !s.contains(x));
+    }
 
+    fn cleanup_congruent(&mut self, s: &[Address], idx: usize) -> Result<()> {
         // We will be iterating over the set and removing from it. Rust does not allow that, thus making a copy
         let addrs: Vec<usize> = self.addrs[idx].clone();
 
         // We will have to manually update index to take removed values into account.
-        let mut idx = 0;
+        let mut i = 0;
         for x in addrs {
-            let mut score = 0;
-            for _ in 0..VERIFICATION_TIMES {
-                if self.check_evicts(s.iter().copied(), x)? {
-                    score += 1;
-                } else {
-                    score -= 1;
-                }
-            }
-
             // If `x` is evicted by our new cache set, then we do not need it anymore
-            if score > 0 {
-                // Remove value at index. We do not need to update `idx` as the next val will have the same
+            if self.check_evicts(s.iter().copied(), x)? {
+                // Remove value at index. We do not need to update `i` as the next val will have the same
                 // index as we removed the current.
-                self.addrs.remove(idx);
+                self.addrs[idx].remove(i);
             } else {
-                idx += 1;
+                i += 1;
             }
         }
 
