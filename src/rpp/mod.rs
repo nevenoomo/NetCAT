@@ -331,14 +331,15 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
     /// Adds the given set and derived set for the same color (page)
     #[cfg(feature = "xor_slice_hash")]
-    fn add_sets(&mut self, set: EvictionSet) -> Result<()> {
+    fn add_sets(&mut self, set: &[Address]) -> Result<()> {
         const NUM_VARIANTS: usize = 64; // bits 12 - 6 determine the cache set. We have 2^6 = 64 options to change those
 
         // this vector corresponds to the new color which we have profiled
         // one color corresponds to as much sets as there are on one page
         // other sets for pages with the same color will not pass the uniqueness check
         let mut sets = Vec::with_capacity(self.params.n_sets_per_page);
-        sets.push(set.clone());
+        sets.push(set.to_vec());
+        
         for i in 1..NUM_VARIANTS {
             // We construct 64 new sets given one
             let new_set = set.iter().copied().map(|x| x ^ (i << CTL_BIT)).collect(); // xor all options with addrs from the given set
