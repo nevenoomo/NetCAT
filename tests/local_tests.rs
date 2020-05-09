@@ -50,12 +50,6 @@ fn cache_allocation_test() {
     let mut buf = vec![1u8; 8388608];
     let mut rng = rand::thread_rng();
 
-    // Evict the whole cache
-    #[cfg(not(feature = "clflush"))]
-    for v in buf.iter_mut() {
-        *v = rand::random();
-    }
-    #[cfg(feature = "clflush")]
     netcat::connection::local::flush(&buf);
 
     let ofs = rng.gen_range(0, 8388608);

@@ -108,10 +108,7 @@ fn main() {
         .unwrap_or_else(|e| panic!("ERROR: failed to handshake: {}", e));
 
     println!("RDMA handshake successfull");
-    #[cfg(not(feature = "clflush"))]
     overwrite_check(&mut mr);
-    #[cfg(feature = "clflush")]
-    flush_on_command(&mut mr);
 }
 
 fn overwrite_check<T>(mr: &mut ibverbs::MemoryRegion<T>)
@@ -126,23 +123,5 @@ where
             println!("Someone has written to the memory region, got: {}", mr[0]);
             last_val = mr[0];
         }
-    }
-}
-
-#[cfg(feature = "clflush")]
-fn flush_on_command<T>(mr: &mut ibverbs::MemoryRegion<T>) {
-    println!("Will evict with clflush");
-    use netcat::connection::local::flush;
-    use std::io::{Read, Write};
-    const CTL_ADDR: &str = "10.0.2.4:9004";
-    let mut buf = [0u8];
-
-    let listner = net::TcpListener::bind(CTL_ADDR).expect("Listener failed");
-    let (mut stream, _addr) = listner.accept().expect("Accepting failed");
-    stream.set_nonblocking(false).unwrap();
-    loop {
-        stream.read(&mut buf).expect("Cannot read from stream");
-        stream.write(&buf).expect("Cannot echo");
-        flush(&mr[..]);
     }
 }
