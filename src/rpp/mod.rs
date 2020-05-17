@@ -55,7 +55,6 @@ type EvictionSets = Vec<EvictionSet>;
 type ColoredSets = Vec<EvictionSets>;
 
 /// Probe results with wraped data
-// NOTE maybe downgrade to Option??
 #[derive(Clone, Debug, PartialOrd, PartialEq, Eq, Ord, Serialize, Deserialize)]
 pub enum ProbeResult<T> {
     Activated(T),
@@ -418,7 +417,7 @@ impl<C: CacheConnector<Item = Contents>> Rpp<C> {
 
             n += 1;
         }
-
+        
         // Here we excided the number of addrs, but registered no eviction
         // We remove the faulty address not to cause more issues
         Err(Error::new(

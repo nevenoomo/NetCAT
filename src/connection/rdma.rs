@@ -151,7 +151,6 @@ impl RdmaServerConnector {
         })?;
 
         // Sending info for RDMA handshake over TcpStream;
-        // NOTE using writers in such a way may cause issues. May use .try_clone() instead
         bincode::serialize_into(&mut stream, &msg).map_err(|e| {
             Error::new(
                 ErrorKind::Other,
@@ -337,7 +336,6 @@ impl MemoryConnector for RdmaServerConnector {
 impl CacheConnector for RdmaServerConnector {
     type Item = RdmaPrimitive;
 
-    // TODO might cange it to allocate a new memory region
     #[inline(always)]
     fn reserve(&mut self, _size: usize) {}
 

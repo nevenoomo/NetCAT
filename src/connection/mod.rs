@@ -7,23 +7,6 @@ use std::io::Result;
 pub type Time = u64;
 pub type Address = usize;
 
-// TODO maybe use this macro
-// #[macro_export]
-// macro_rules! timed {
-//     ($(s:stmt)*) => {{
-//         use std::time::Instant;
-//         let now = Instant::now();
-//         $(
-//             $s
-//         )*
-//         now
-//             .elapsed()
-//             .as_nanos()
-//             .try_into()
-//             .unwrap_or(Time::max_value())
-//     }};
-// }
-
 /// Interface for accessing memory depending on the offset.
 pub trait MemoryConnector {
     type Item;

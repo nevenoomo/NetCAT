@@ -44,7 +44,6 @@ impl Pattern {
         // For now, we expect only one pattern to arise. If not, then other methods should be used
         // NOTE one may add confidence level for each pattern, based on the statistics for each entry in
         // a pattern
-        // UGLY should have a separete error type
         if fnd_pts.len() != 1 {
             return Err(Error::new(
                 ErrorKind::Other,

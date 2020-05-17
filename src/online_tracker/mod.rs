@@ -370,7 +370,6 @@ where
     }
 
     #[inline(always)]
-    // NOTE maybe we do not need to store all the information
     fn save(
         &mut self,
         probes: Vec<ProbeResult<Latencies>>,
